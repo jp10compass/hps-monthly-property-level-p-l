@@ -180,14 +180,62 @@ elif st.session_state.step == "export":
     n_months = acc["Accounting Period"].nunique()
 
     st.success(f"Ready to export — {len(acc):,} rows across {n_months} month(s)")
+
+    ### ── Version 1: Long format ──────────────────────────────────────────────
+    st.subheader("Version 1 — Long Format")
+    st.caption(
+        "One row per Account + Property + Month combination. "
+        "Best for filtering, pivot tables, and loading into databases or BI tools."
+    )
     st.dataframe(acc, use_container_width=True)
 
-    csv = acc.to_csv(index=False).encode("utf-8")
-
+    csv_long = acc.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="Download CSV",
-        data=csv,
-        file_name="hps_pnl_merged.csv",
+        label="Download Long Format CSV",
+        data=csv_long,
+        file_name="hps_pnl_long.csv",
+        mime="text/csv",
+        type="primary",
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    ### ── Version 2: Wide format ──────────────────────────────────────────────
+    st.subheader("Version 2 — Wide Format")
+    st.caption(
+        "One row per Account + Property combination, with one column per month sorted earliest to latest. "
+        "Best for side-by-side month comparison and sharing as a report."
+    )
+
+    ### Build wide format from the same accumulated data
+    ### Convert Accounting Period to string in YYYY/MM/DD format for column headers
+    acc_wide = acc.copy()
+    acc_wide["Accounting Period"] = acc_wide["Accounting Period"].astype(str).str.replace("-", "/")
+
+    ### Sort months chronologically before pivoting
+    sorted_months = sorted(acc_wide["Accounting Period"].unique())
+
+    wide_df = acc_wide.pivot_table(
+        index=["Account", "Property Name", "Property Owner"],
+        columns="Accounting Period",
+        values="Amount",
+        aggfunc="first",
+    ).reset_index()
+
+    ### Enforce chronological column order
+    wide_df = wide_df[["Account", "Property Name", "Property Owner"] + sorted_months]
+
+    ### Remove the column index name added by pivot_table
+    wide_df.columns.name = None
+
+    st.dataframe(wide_df, use_container_width=True)
+
+    csv_wide = wide_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download Wide Format CSV",
+        data=csv_wide,
+        file_name="hps_pnl_wide.csv",
         mime="text/csv",
         type="primary",
         use_container_width=True,
