@@ -233,18 +233,28 @@ elif st.session_state.step == "export":
     ### Sort months chronologically before pivoting
     sorted_months = sorted(acc_wide["Accounting Period"].unique())
 
+    ### Lock in the first-seen owner name per property — avoids duplicate rows
+    ### caused by owner name variations across files (suffix, name order, etc.)
+    owner_lookup = acc_wide.groupby("Property Name")["Property Owner"].first().reset_index()
+
+    ### Pivot on Account + Property Name only to guarantee one row per combination
     wide_df = acc_wide.pivot_table(
-        index=["Account", "Property Name", "Property Owner"],
+        index=["Account", "Property Name"],
         columns="Accounting Period",
         values="Amount",
         aggfunc="first",
     ).reset_index()
 
-    ### Enforce chronological column order
-    wide_df = wide_df[["Account", "Property Name", "Property Owner"] + sorted_months]
-
-    ### Remove the column index name added by pivot_table
     wide_df.columns.name = None
+
+    ### Enforce chronological column order
+    wide_df = wide_df[["Account", "Property Name"] + sorted_months]
+
+    ### Add Property Owner back using the first-seen name
+    wide_df = wide_df.merge(owner_lookup, on="Property Name", how="left")
+
+    ### Final column order: Account, Property Name, Property Owner, then months
+    wide_df = wide_df[["Account", "Property Name", "Property Owner"] + sorted_months]
 
     st.dataframe(wide_df, use_container_width=True)
 
