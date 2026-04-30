@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import pandas as pd
 
@@ -27,6 +28,18 @@ def clean_owner_name(owner):
     if pd.isna(owner):
         return ""
     return " ".join(str(owner).replace("(", "").replace(")", "").split())
+
+
+def normalize_property_name(name):
+    if pd.isna(name):
+        return name
+    text = str(name).strip()
+    ### Strip trailing suffixes in any order/combination:
+    ###   .## (dot followed by digits, e.g. .20, .18, .25)
+    ###   X+  (one or more X characters, e.g. X, XX, XXX)
+    ### Only removes when preceded by a space, so mid-name X characters are safe
+    text = re.sub(r'(\s+\.\d+|\s+X+)+$', '', text, flags=re.IGNORECASE).strip()
+    return text
 
 
 ROLLUP_ACCOUNTS = {"Gross Profit", "Net Ordinary Income", "Net Other Income"}
@@ -62,10 +75,11 @@ def process_file(df, first_data_col_idx, period_month_end):
             prop_owner_text = "" if pd.isna(prop_owner) else str(prop_owner).strip()
             is_grand_total = col_idx == n_cols - 1
             is_owner_subtotal = "total" in prop_owner_text.lower() and not is_grand_total
+            raw_prop_name = "N/A" if pd.isna(prop_name) else str(prop_name).strip()
             records.append({
                 "Account": account,
                 "Amount": row.iloc[col_idx],
-                "Property Name": "N/A" if pd.isna(prop_name) else str(prop_name).strip(),
+                "Property Name": normalize_property_name(raw_prop_name),
                 "Property Owner": prop_owner_text,
                 "Is_Owner_Subtotal": is_owner_subtotal,
                 "Is_Grand_Total": is_grand_total,
@@ -212,6 +226,9 @@ elif st.session_state.step == "export":
     ### Convert Accounting Period to string in YYYY/MM/DD format for column headers
     acc_wide = acc.copy()
     acc_wide["Accounting Period"] = acc_wide["Accounting Period"].astype(str).str.replace("-", "/")
+
+    ### Treat 0 as blank — Excel stores empty cells as 0, not as actual values
+    acc_wide["Amount"] = acc_wide["Amount"].replace(0, pd.NA)
 
     ### Sort months chronologically before pivoting
     sorted_months = sorted(acc_wide["Accounting Period"].unique())
