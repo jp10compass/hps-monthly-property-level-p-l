@@ -201,9 +201,15 @@ elif st.session_state.step == "export":
         "One row per Account + Property + Month combination. "
         "Best for filtering, pivot tables, and loading into databases or BI tools."
     )
-    st.dataframe(acc, use_container_width=True)
+    acc_long = acc[(acc["Amount"].notna()) & (acc["Amount"] != 0) & (acc["Is_Grand_Total"] == False)].copy()
+    acc_long = acc_long.drop(columns=["Is_Owner_Subtotal", "Is_Grand_Total"])
 
-    csv_long = acc.to_csv(index=False).encode("utf-8")
+    ### Normalize Property Owner to first-seen name per property (same logic as wide format)
+    owner_lookup_long = acc_long.groupby("Property Name")["Property Owner"].first()
+    acc_long["Property Owner"] = acc_long["Property Name"].map(owner_lookup_long)
+    st.dataframe(acc_long, use_container_width=True)
+
+    csv_long = acc_long.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="Download Long Format CSV",
         data=csv_long,
