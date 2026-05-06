@@ -376,6 +376,15 @@ elif st.session_state.tool == "tool2":
                 df["Owner"] = df["Owner"].str.replace(" -C$", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
                 df["Property"] = df["Property"].str.replace("XXX", "", regex=False).str.replace(r"\.\d{2}", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
 
+                # Lock first-seen Owner per Property before grouping
+                owner_lookup = df.groupby("Property")["Owner"].first()
+
+                # Group by Accounting Period + Account + Property, sum numeric columns
+                group_keys = ["Accounting Period", "Account", "Property"]
+                numeric_cols = df.select_dtypes(include="number").columns.tolist()
+                df = df.groupby(group_keys, as_index=False)[numeric_cols].sum()
+                df["Owner"] = df["Property"].map(owner_lookup)
+
             st.session_state.tool2_accumulated = pd.concat(
                 [st.session_state.tool2_accumulated, df], ignore_index=True
             )
