@@ -376,6 +376,10 @@ elif st.session_state.tool == "tool2":
                 df["Owner"] = df["Owner"].str.replace(" -C$", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
                 df["Property"] = df["Property"].str.replace("XXX", "", regex=False).str.replace(r"\.\d{2}", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
 
+                # Force Amount to numeric in case it was read as text
+                if "Amount" in df.columns:
+                    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+
                 # Lock first-seen Owner per Property before grouping
                 owner_lookup = df.groupby("Property")["Owner"].first()
 
