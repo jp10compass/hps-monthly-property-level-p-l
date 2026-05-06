@@ -37,6 +37,25 @@ def normalize_property_name(name):
     return text
 
 
+def apply_property_merges(df, merges):
+    rename_map = {}
+    for group in merges:
+        canonical = group["canonical"]
+        for variant in group["variants"]:
+            if variant != canonical:
+                rename_map[variant] = canonical
+    if not rename_map:
+        return df
+    df = df.copy()
+    df["Property"] = df["Property"].replace(rename_map)
+    owner_lookup = df.groupby("Property")["Owner"].first()
+    group_keys = ["Accounting Period", "Account", "Property"]
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    df = df.groupby(group_keys, as_index=False)[numeric_cols].sum()
+    df["Owner"] = df["Property"].map(owner_lookup)
+    return df
+
+
 ROLLUP_ACCOUNTS = {"Gross Profit", "Net Ordinary Income", "Net Other Income"}
 
 
@@ -108,6 +127,8 @@ if "tool2_step" not in st.session_state:
     st.session_state.tool2_step = "upload"
 if "tool2_accumulated" not in st.session_state:
     st.session_state.tool2_accumulated = pd.DataFrame()
+if "tool2_merges" not in st.session_state:
+    st.session_state.tool2_merges = []
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -119,6 +140,7 @@ def go_home():
     st.session_state.raw_df = None
     st.session_state.tool2_step = "upload"
     st.session_state.tool2_accumulated = pd.DataFrame()
+    st.session_state.tool2_merges = []
 
 
 if st.session_state.tool is None:
@@ -405,14 +427,78 @@ elif st.session_state.tool == "tool2":
         st.success(f"{n_files} file(s) loaded — {len(acc):,} total rows")
         st.dataframe(acc, use_container_width=True)
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("Add Another File", use_container_width=True):
                 st.session_state.tool2_step = "upload"
                 st.rerun()
         with col2:
+            if st.button("Merge Properties", use_container_width=True):
+                st.session_state.tool2_step = "merge"
+                st.rerun()
+        with col3:
             if st.button("Export", type="primary", use_container_width=True):
                 st.session_state.tool2_step = "export"
+                st.rerun()
+
+    # ── STEP: MERGE ───────────────────────────────────────────────────────────
+
+    elif st.session_state.tool2_step == "merge":
+
+        st.subheader("Merge Properties")
+        st.caption("Group property names that refer to the same property. Select all variants, then pick which name to keep.")
+
+        all_properties = sorted(st.session_state.tool2_accumulated["Property"].unique().tolist())
+
+        if st.session_state.tool2_merges:
+            st.write("**Current merge groups:**")
+            for i, group in enumerate(st.session_state.tool2_merges):
+                col1, col2 = st.columns([6, 1])
+                with col1:
+                    variants_str = ", ".join(f"`{v}`" for v in group["variants"] if v != group["canonical"])
+                    st.write(f"{variants_str} → **{group['canonical']}**")
+                with col2:
+                    if st.button("Remove", key=f"remove_merge_{i}"):
+                        st.session_state.tool2_merges.pop(i)
+                        st.rerun()
+            st.divider()
+
+        st.write("**Add a new merge group:**")
+        n = len(st.session_state.tool2_merges)
+        selected_variants = st.multiselect(
+            "Select property names to merge",
+            options=all_properties,
+            key=f"merge_variants_{n}",
+        )
+
+        if len(selected_variants) >= 2:
+            canonical = st.radio(
+                "Which name to keep?",
+                options=selected_variants,
+                key=f"merge_canonical_{n}",
+            )
+            if st.button("Add Group", type="primary"):
+                st.session_state.tool2_merges.append({
+                    "variants": selected_variants,
+                    "canonical": canonical,
+                })
+                st.rerun()
+
+        st.divider()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True):
+                st.session_state.tool2_step = "action"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Continue", type="primary", use_container_width=True):
+                if st.session_state.tool2_merges:
+                    st.session_state.tool2_accumulated = apply_property_merges(
+                        st.session_state.tool2_accumulated,
+                        st.session_state.tool2_merges,
+                    )
+                st.session_state.tool2_step = "action"
                 st.rerun()
 
     # ── STEP: EXPORT ──────────────────────────────────────────────────────────
@@ -447,4 +533,5 @@ elif st.session_state.tool == "tool2":
         if st.button("Restart", use_container_width=True):
             st.session_state.tool2_step = "upload"
             st.session_state.tool2_accumulated = pd.DataFrame()
+            st.session_state.tool2_merges = []
             st.rerun()
