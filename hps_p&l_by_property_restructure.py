@@ -2,8 +2,7 @@ import re
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="HPS P&L Restructure", layout="wide")
-st.title("HPS P&L by Property — Multi-Month Restructure")
+st.set_page_config(page_title="HPS Tools", layout="wide")
 
 
 ### ── HELPERS ─────────────────────────────────────────────────────────────────
@@ -34,10 +33,6 @@ def normalize_property_name(name):
     if pd.isna(name):
         return name
     text = str(name).strip()
-    ### Strip trailing suffixes in any order/combination:
-    ###   .## (dot followed by digits, e.g. .20, .18, .25)
-    ###   X+  (one or more X characters, e.g. X, XX, XXX)
-    ### Only removes when preceded by a space, so mid-name X characters are safe
     text = re.sub(r'(\s+\.\d+|\s+X+)+$', '', text, flags=re.IGNORECASE).strip()
     return text
 
@@ -101,183 +96,342 @@ def process_file(df, first_data_col_idx, period_month_end):
 
 ### ── SESSION STATE INIT ──────────────────────────────────────────────────────
 
+if "tool" not in st.session_state:
+    st.session_state.tool = None
 if "step" not in st.session_state:
     st.session_state.step = "upload"
 if "accumulated" not in st.session_state:
     st.session_state.accumulated = pd.DataFrame()
 if "raw_df" not in st.session_state:
     st.session_state.raw_df = None
+if "tool2_step" not in st.session_state:
+    st.session_state.tool2_step = "upload"
+if "tool2_accumulated" not in st.session_state:
+    st.session_state.tool2_accumulated = pd.DataFrame()
 
 
-### ── STEP: UPLOAD ────────────────────────────────────────────────────────────
+### ── MENU ────────────────────────────────────────────────────────────────────
 
-if st.session_state.step == "upload":
-
-    if not st.session_state.accumulated.empty:
-        n = st.session_state.accumulated["Accounting Period"].nunique()
-        st.info(f"{n} month(s) already loaded. Upload the next file.")
-
-    uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
-
-    if uploaded_file is not None:
-        st.session_state.raw_df = pd.read_excel(uploaded_file, header=None)
-        st.session_state.step = "inputs"
-        st.rerun()
+def go_home():
+    st.session_state.tool = None
+    st.session_state.step = "upload"
+    st.session_state.accumulated = pd.DataFrame()
+    st.session_state.raw_df = None
+    st.session_state.tool2_step = "upload"
+    st.session_state.tool2_accumulated = pd.DataFrame()
 
 
-### ── STEP: INPUTS ────────────────────────────────────────────────────────────
-
-elif st.session_state.step == "inputs":
-
-    st.subheader("File Preview")
-    st.dataframe(st.session_state.raw_df.head(10), use_container_width=True)
+if st.session_state.tool is None:
+    st.title("HPS Tools")
+    st.write("Select a tool to get started.")
+    st.divider()
 
     col1, col2 = st.columns(2)
     with col1:
-        col_letter = st.text_input("First data column letter (e.g. H)")
+        st.subheader("P&L by Property Data - Based on Monthly P&L by Property")
+        st.caption("P&L by Property Data - Based on Monthly P&L by Property")
+        if st.button("Open", key="open_pnl", use_container_width=True, type="primary"):
+            st.session_state.tool = "pnl_restructure"
+            st.rerun()
     with col2:
-        date_input = st.text_input("Accounting period date (MM/DD/YYYY)")
+        st.subheader("P&L by Property Data - Based on GL Report")
+        st.caption("P&L by Property Data - Based on GL Report")
+        if st.button("Open", key="open_tool2", use_container_width=True, type="primary"):
+            st.session_state.tool = "tool2"
+            st.rerun()
 
-    if st.button("Process", type="primary"):
-        if not col_letter:
-            st.error("Enter the first data column letter.")
-        elif not date_input:
-            st.error("Enter the accounting period date.")
-        else:
-            try:
-                col_idx = convert_letter_to_index(col_letter)
-                period_date = pd.to_datetime(date_input, format="%m/%d/%Y")
-                period_month_end = period_date + pd.offsets.MonthEnd(0)
 
-                with st.spinner(f"Processing {period_month_end.strftime('%B %Y')}..."):
-                    month_df = process_file(
-                        st.session_state.raw_df, col_idx, period_month_end
+### ── TOOL 1: P&L BY PROPERTY RESTRUCTURE ────────────────────────────────────
+
+elif st.session_state.tool == "pnl_restructure":
+
+    st.title("P&L by Property Data - Based on Monthly P&L by Property")
+    if st.button("← Back to Menu", key="back_pnl"):
+        go_home()
+        st.rerun()
+
+    st.divider()
+
+    # ── STEP: UPLOAD ──────────────────────────────────────────────────────────
+
+    if st.session_state.step == "upload":
+
+        if not st.session_state.accumulated.empty:
+            n = st.session_state.accumulated["Accounting Period"].nunique()
+            st.info(f"{n} month(s) already loaded. Upload the next file.")
+
+        uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
+
+        if uploaded_file is not None:
+            st.session_state.raw_df = pd.read_excel(uploaded_file, header=None)
+            st.session_state.step = "inputs"
+            st.rerun()
+
+    # ── STEP: INPUTS ──────────────────────────────────────────────────────────
+
+    elif st.session_state.step == "inputs":
+
+        st.subheader("File Preview")
+        st.dataframe(st.session_state.raw_df.head(10), use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            col_letter = st.text_input("First data column letter (e.g. H)")
+        with col2:
+            date_input = st.text_input("Accounting period date (MM/DD/YYYY)")
+
+        if st.button("Process", type="primary"):
+            if not col_letter:
+                st.error("Enter the first data column letter.")
+            elif not date_input:
+                st.error("Enter the accounting period date.")
+            else:
+                try:
+                    col_idx = convert_letter_to_index(col_letter)
+                    period_date = pd.to_datetime(date_input, format="%m/%d/%Y")
+                    period_month_end = period_date + pd.offsets.MonthEnd(0)
+
+                    with st.spinner(f"Processing {period_month_end.strftime('%B %Y')}..."):
+                        month_df = process_file(
+                            st.session_state.raw_df, col_idx, period_month_end
+                        )
+
+                    st.session_state.accumulated = pd.concat(
+                        [st.session_state.accumulated, month_df], ignore_index=True
                     )
+                    st.session_state.raw_df = None
+                    st.session_state.step = "action"
+                    st.rerun()
 
-                st.session_state.accumulated = pd.concat(
-                    [st.session_state.accumulated, month_df], ignore_index=True
-                )
-                st.session_state.raw_df = None
-                st.session_state.step = "action"
+                except ValueError as e:
+                    st.error(f"Error: {e} — check your date format (MM/DD/YYYY).")
+
+    # ── STEP: ACTION ──────────────────────────────────────────────────────────
+
+    elif st.session_state.step == "action":
+
+        acc = st.session_state.accumulated
+        n_months = acc["Accounting Period"].nunique()
+
+        st.success(f"{n_months} month(s) loaded — {len(acc):,} total rows")
+        st.dataframe(acc, use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Add Another Month", use_container_width=True):
+                st.session_state.step = "upload"
+                st.rerun()
+        with col2:
+            if st.button("Export", type="primary", use_container_width=True):
+                st.session_state.step = "export"
                 st.rerun()
 
-            except ValueError as e:
-                st.error(f"Error: {e} — check your date format (MM/DD/YYYY).")
+    # ── STEP: EXPORT ──────────────────────────────────────────────────────────
 
+    elif st.session_state.step == "export":
 
-### ── STEP: ACTION ────────────────────────────────────────────────────────────
+        acc = st.session_state.accumulated
+        n_months = acc["Accounting Period"].nunique()
 
-elif st.session_state.step == "action":
+        st.success(f"Ready to export — {len(acc):,} rows across {n_months} month(s)")
 
-    acc = st.session_state.accumulated
-    n_months = acc["Accounting Period"].nunique()
+        st.subheader("Version 1 — Long Format")
+        st.caption(
+            "One row per Account + Property + Month combination. "
+            "Best for filtering, pivot tables, and loading into databases or BI tools."
+        )
+        acc_long = acc[(acc["Amount"].notna()) & (acc["Amount"] != 0) & (acc["Is_Grand_Total"] == False)].copy()
+        acc_long = acc_long.drop(columns=["Is_Owner_Subtotal", "Is_Grand_Total"])
 
-    st.success(f"{n_months} month(s) loaded — {len(acc):,} total rows")
-    st.dataframe(acc, use_container_width=True)
+        owner_lookup_long = acc_long.groupby("Property Name")["Property Owner"].first()
+        acc_long["Property Owner"] = acc_long["Property Name"].map(owner_lookup_long)
+        st.dataframe(acc_long, use_container_width=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Add Another Month", use_container_width=True):
+        csv_long = acc_long.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download Long Format CSV",
+            data=csv_long,
+            file_name="hps_pnl_long.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        st.subheader("Version 2 — Wide Format")
+        st.caption(
+            "One row per Account + Property combination, with one column per month sorted earliest to latest. "
+            "Best for side-by-side month comparison and sharing as a report."
+        )
+
+        acc_wide = acc.copy()
+        acc_wide["Accounting Period"] = acc_wide["Accounting Period"].astype(str).str.replace("-", "/")
+        acc_wide["Amount"] = acc_wide["Amount"].replace(0, pd.NA)
+
+        sorted_months = sorted(acc_wide["Accounting Period"].unique())
+
+        owner_lookup = acc_wide.groupby("Property Name")["Property Owner"].first().reset_index()
+
+        wide_df = acc_wide.pivot_table(
+            index=["Account", "Property Name"],
+            columns="Accounting Period",
+            values="Amount",
+            aggfunc="first",
+        ).reset_index()
+
+        wide_df.columns.name = None
+        wide_df = wide_df[["Account", "Property Name"] + sorted_months]
+        wide_df = wide_df.merge(owner_lookup, on="Property Name", how="left")
+        wide_df = wide_df[["Account", "Property Name", "Property Owner"] + sorted_months]
+
+        st.dataframe(wide_df, use_container_width=True)
+
+        csv_wide = wide_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download Wide Format CSV",
+            data=csv_wide,
+            file_name="hps_pnl_wide.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        if st.button("Restart", use_container_width=True):
+            st.session_state.accumulated = pd.DataFrame()
+            st.session_state.raw_df = None
             st.session_state.step = "upload"
             st.rerun()
-    with col2:
-        if st.button("Export", type="primary", use_container_width=True):
-            st.session_state.step = "export"
+
+
+### ── TOOL 2: P&L BY PROPERTY DATA - BASED ON GL REPORT ──────────────────────
+
+elif st.session_state.tool == "tool2":
+
+    import csv
+
+    st.title("P&L by Property Data - Based on GL Report")
+    if st.button("← Back to Menu", key="back_tool2"):
+        go_home()
+        st.rerun()
+
+    st.divider()
+
+    # ── STEP: UPLOAD ──────────────────────────────────────────────────────────
+
+    if st.session_state.tool2_step == "upload":
+
+        if not st.session_state.tool2_accumulated.empty:
+            n = st.session_state.tool2_accumulated["Accounting Period"].nunique()
+            st.info(f"{n} file(s) already loaded. Upload the next file.")
+
+        uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
+
+        if uploaded_file is not None:
+            with st.spinner("Processing..."):
+                df = pd.read_excel(uploaded_file, header=None)
+
+                # Remove first 3 rows, use 4th row as header
+                df = df.iloc[3:].reset_index(drop=True)
+                df.columns = df.iloc[0]
+                df = df[1:].reset_index(drop=True)
+
+                # Remove first 4 columns
+                df = df.iloc[:, 4:]
+
+                # Remove rows where Account is empty
+                df.columns = df.columns.str.strip()
+                df = df[df["Account"].notna()]
+                df = df[df["Account"] != ""]
+                df = df.reset_index(drop=True)
+
+                # Create Accounting Period from Date
+                df["Date"] = pd.to_datetime(df["Date"])
+                df["Accounting Period"] = df["Date"] + pd.offsets.MonthEnd(0)
+
+                # Create Owner and Property from Name / Class
+                owners = []
+                properties = []
+                for _, row in df.iterrows():
+                    name_value = str(row["Name"])
+                    class_value = str(row["Class"])
+                    if ":" in name_value:
+                        parts = name_value.split(":", 1)
+                        owners.append(parts[0].strip())
+                        properties.append(parts[1].strip())
+                    elif ":" in class_value:
+                        parts = class_value.split(":", 1)
+                        owners.append(parts[0].strip())
+                        properties.append(parts[1].strip())
+                    else:
+                        owners.append(class_value.strip())
+                        properties.append(class_value.strip())
+
+                df["Owner"] = owners
+                df["Property"] = properties
+
+                # Clean Owner and Property
+                df["Owner"] = df["Owner"].str.replace(" -C$", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
+                df["Property"] = df["Property"].str.replace("XXX", "", regex=False).str.replace(r"\.\d{2}", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
+
+            st.session_state.tool2_accumulated = pd.concat(
+                [st.session_state.tool2_accumulated, df], ignore_index=True
+            )
+            st.session_state.tool2_step = "action"
             st.rerun()
 
+    # ── STEP: ACTION ──────────────────────────────────────────────────────────
 
-### ── STEP: EXPORT ────────────────────────────────────────────────────────────
+    elif st.session_state.tool2_step == "action":
 
-elif st.session_state.step == "export":
+        acc = st.session_state.tool2_accumulated
+        n_files = acc["Accounting Period"].nunique()
 
-    acc = st.session_state.accumulated
-    n_months = acc["Accounting Period"].nunique()
+        st.success(f"{n_files} file(s) loaded — {len(acc):,} total rows")
+        st.dataframe(acc, use_container_width=True)
 
-    st.success(f"Ready to export — {len(acc):,} rows across {n_months} month(s)")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Add Another File", use_container_width=True):
+                st.session_state.tool2_step = "upload"
+                st.rerun()
+        with col2:
+            if st.button("Export", type="primary", use_container_width=True):
+                st.session_state.tool2_step = "export"
+                st.rerun()
 
-    ### ── Version 1: Long format ──────────────────────────────────────────────
-    st.subheader("Version 1 — Long Format")
-    st.caption(
-        "One row per Account + Property + Month combination. "
-        "Best for filtering, pivot tables, and loading into databases or BI tools."
-    )
-    acc_long = acc[(acc["Amount"].notna()) & (acc["Amount"] != 0) & (acc["Is_Grand_Total"] == False)].copy()
-    acc_long = acc_long.drop(columns=["Is_Owner_Subtotal", "Is_Grand_Total"])
+    # ── STEP: EXPORT ──────────────────────────────────────────────────────────
 
-    ### Normalize Property Owner to first-seen name per property (same logic as wide format)
-    owner_lookup_long = acc_long.groupby("Property Name")["Property Owner"].first()
-    acc_long["Property Owner"] = acc_long["Property Name"].map(owner_lookup_long)
-    st.dataframe(acc_long, use_container_width=True)
+    elif st.session_state.tool2_step == "export":
 
-    csv_long = acc_long.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download Long Format CSV",
-        data=csv_long,
-        file_name="hps_pnl_long.csv",
-        mime="text/csv",
-        type="primary",
-        use_container_width=True,
-    )
+        acc = st.session_state.tool2_accumulated.copy()
+        n_files = acc["Accounting Period"].nunique()
 
-    st.divider()
+        columns_to_remove = ["Type", "Num", "Name", "Memo", "Class"]
+        df_export = acc.drop(columns=columns_to_remove, errors="ignore")
 
-    ### ── Version 2: Wide format ──────────────────────────────────────────────
-    st.subheader("Version 2 — Wide Format")
-    st.caption(
-        "One row per Account + Property combination, with one column per month sorted earliest to latest. "
-        "Best for side-by-side month comparison and sharing as a report."
-    )
+        df_export["Owner"] = '="' + df_export["Owner"].astype(str).str.replace('"', '""') + '"'
+        df_export["Property"] = '="' + df_export["Property"].astype(str).str.replace('"', '""') + '"'
 
-    ### Build wide format from the same accumulated data
-    ### Convert Accounting Period to string in YYYY/MM/DD format for column headers
-    acc_wide = acc.copy()
-    acc_wide["Accounting Period"] = acc_wide["Accounting Period"].astype(str).str.replace("-", "/")
+        csv_data = df_export.to_csv(index=False, quoting=csv.QUOTE_MINIMAL).encode("utf-8")
 
-    ### Treat 0 as blank — Excel stores empty cells as 0, not as actual values
-    acc_wide["Amount"] = acc_wide["Amount"].replace(0, pd.NA)
+        st.success(f"Ready to export — {len(df_export):,} rows across {n_files} file(s)")
+        st.dataframe(df_export, use_container_width=True)
 
-    ### Sort months chronologically before pivoting
-    sorted_months = sorted(acc_wide["Accounting Period"].unique())
+        st.download_button(
+            label="Download CSV",
+            data=csv_data,
+            file_name="cleaned_data.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+        )
 
-    ### Lock in the first-seen owner name per property — avoids duplicate rows
-    ### caused by owner name variations across files (suffix, name order, etc.)
-    owner_lookup = acc_wide.groupby("Property Name")["Property Owner"].first().reset_index()
+        st.divider()
 
-    ### Pivot on Account + Property Name only to guarantee one row per combination
-    wide_df = acc_wide.pivot_table(
-        index=["Account", "Property Name"],
-        columns="Accounting Period",
-        values="Amount",
-        aggfunc="first",
-    ).reset_index()
-
-    wide_df.columns.name = None
-
-    ### Enforce chronological column order
-    wide_df = wide_df[["Account", "Property Name"] + sorted_months]
-
-    ### Add Property Owner back using the first-seen name
-    wide_df = wide_df.merge(owner_lookup, on="Property Name", how="left")
-
-    ### Final column order: Account, Property Name, Property Owner, then months
-    wide_df = wide_df[["Account", "Property Name", "Property Owner"] + sorted_months]
-
-    st.dataframe(wide_df, use_container_width=True)
-
-    csv_wide = wide_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download Wide Format CSV",
-        data=csv_wide,
-        file_name="hps_pnl_wide.csv",
-        mime="text/csv",
-        type="primary",
-        use_container_width=True,
-    )
-
-    st.divider()
-
-    if st.button("Restart", use_container_width=True):
-        st.session_state.accumulated = pd.DataFrame()
-        st.session_state.raw_df = None
-        st.session_state.step = "upload"
-        st.rerun()
+        if st.button("Restart", use_container_width=True):
+            st.session_state.tool2_step = "upload"
+            st.session_state.tool2_accumulated = pd.DataFrame()
+            st.rerun()
