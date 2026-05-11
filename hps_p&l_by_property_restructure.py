@@ -406,7 +406,7 @@ elif st.session_state.tool == "tool2":
                 owner_lookup = df.groupby("Property")["Owner"].first()
 
                 # Group by Accounting Period + Account + Property, sum numeric columns
-                group_keys = ["Accounting Period", "Account", "Property"]
+                group_keys = ["Accounting Period", "Account", "Property", "Department"]
                 numeric_cols = df.select_dtypes(include="number").columns.tolist()
                 df = df.groupby(group_keys, as_index=False)[numeric_cols].sum()
                 df["Owner"] = df["Property"].map(owner_lookup)
@@ -508,8 +508,8 @@ elif st.session_state.tool == "tool2":
         acc = st.session_state.tool2_accumulated.copy()
         n_files = acc["Accounting Period"].nunique()
 
-        columns_to_remove = ["Type", "Num", "Name", "Memo", "Class"]
-        df_export = acc.drop(columns=columns_to_remove, errors="ignore")
+        columns_to_keep = ["Accounting Period", "Account", "Department", "Property", "Owner", "Amount"]
+        df_export = acc[[col for col in columns_to_keep if col in acc.columns]]
 
         df_export["Owner"] = '="' + df_export["Owner"].astype(str).str.replace('"', '""') + '"'
         df_export["Property"] = '="' + df_export["Property"].astype(str).str.replace('"', '""') + '"'
