@@ -49,10 +49,12 @@ def apply_property_merges(df, merges):
     df = df.copy()
     df["Property"] = df["Property"].replace(rename_map)
     owner_lookup = df.groupby("Property")["Owner"].first()
-    group_keys = ["Accounting Period", "Account", "Property"]
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    has_dept = "_group_by_dept" in df.columns and bool(df["_group_by_dept"].any())
+    group_keys = ["Accounting Period", "Account", "Property", "Department"] if has_dept else ["Accounting Period", "Account", "Property"]
+    numeric_cols = [c for c in df.select_dtypes(include="number").columns if c != "_group_by_dept"]
     df = df.groupby(group_keys, as_index=False)[numeric_cols].sum()
     df["Owner"] = df["Property"].map(owner_lookup)
+    df["_group_by_dept"] = has_dept
     return df
 
 
@@ -359,7 +361,8 @@ elif st.session_state.tool == "tool2":
             st.info(f"{n} file(s) already loaded. Upload the next file.")
 
         if st.session_state.tool2_accumulated.empty:
-            st.checkbox("Group by Department", key="tool2_group_by_dept")
+            checked = st.checkbox("Group by Department", value=st.session_state.tool2_group_by_dept)
+            st.session_state.tool2_group_by_dept = checked
         else:
             dept_label = "on" if st.session_state.tool2_group_by_dept else "off"
             st.info(f"Department grouping is **{dept_label}** (set on first upload).")
@@ -453,7 +456,7 @@ elif st.session_state.tool == "tool2":
         st.success(f"{n_files} file(s) loaded — {len(acc):,} total rows")
         st.dataframe(acc, use_container_width=True)
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("Add Another File", use_container_width=True):
                 st.session_state.tool2_step = "upload"
@@ -463,13 +466,9 @@ elif st.session_state.tool == "tool2":
                 st.session_state.tool2_step = "merge"
                 st.rerun()
         with col3:
-            if st.button("Map Owner Type", use_container_width=True):
-                st.session_state.tool2_step = "owner_type"
-                st.rerun()
-        with col4:
-            if st.button("Export", type="primary", use_container_width=True):
+            if st.button("Continue →", type="primary", use_container_width=True):
                 st.session_state.tool2_owner_type_map = None
-                st.session_state.tool2_step = "export"
+                st.session_state.tool2_step = "owner_type"
                 st.rerun()
 
     # ── STEP: MERGE ───────────────────────────────────────────────────────────
@@ -605,13 +604,18 @@ elif st.session_state.tool == "tool2":
             st.info("All owners are already mapped.")
 
         st.divider()
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("← Back", use_container_width=True):
                 st.session_state.tool2_step = "action"
                 st.rerun()
         with col2:
-            if st.button("Apply & Export", type="primary", use_container_width=True):
+            if st.button("Skip (no owner type column)", use_container_width=True):
+                st.session_state.tool2_owner_type_map = None
+                st.session_state.tool2_step = "export"
+                st.rerun()
+        with col3:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True):
                 st.session_state.tool2_owner_type_map = working_map
                 st.session_state.tool2_step = "export"
                 st.rerun()
@@ -641,7 +645,7 @@ elif st.session_state.tool == "tool2":
             owner_type_map = st.session_state.tool2_owner_type_map
             acc["Property Owner Type"] = acc["Owner"].map(lambda o: owner_type_map.get(o, "Third Party"))
 
-        include_dept = "_group_by_dept" in acc.columns and acc["_group_by_dept"].any()
+        include_dept = st.session_state.tool2_group_by_dept and "Department" in acc.columns
         base_cols = ["Accounting Period", "Account", "Department", "Property", "Owner"] if include_dept else ["Accounting Period", "Account", "Property", "Owner"]
         if include_owner_type:
             base_cols = base_cols + ["Property Owner Type", "Amount"]
