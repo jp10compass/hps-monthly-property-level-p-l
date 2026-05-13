@@ -133,6 +133,8 @@ if "tool2_group_by_dept" not in st.session_state:
     st.session_state.tool2_group_by_dept = False
 if "tool2_owner_type_map" not in st.session_state:
     st.session_state.tool2_owner_type_map = None  # None = skipped, dict = applied
+if "tool2_raw_amount_sum" not in st.session_state:
+    st.session_state.tool2_raw_amount_sum = 0.0
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -147,6 +149,7 @@ def go_home():
     st.session_state.tool2_merges = []
     st.session_state.tool2_group_by_dept = False
     st.session_state.tool2_owner_type_map = None
+    st.session_state.tool2_raw_amount_sum = 0.0
 
 
 if st.session_state.tool is None:
@@ -356,7 +359,7 @@ elif st.session_state.tool == "tool2":
             st.info(f"{n} file(s) already loaded. Upload the next file.")
 
         if st.session_state.tool2_accumulated.empty:
-            st.session_state.tool2_group_by_dept = st.checkbox("Group by Department", value=False)
+            st.checkbox("Group by Department", key="tool2_group_by_dept")
         else:
             dept_label = "on" if st.session_state.tool2_group_by_dept else "off"
             st.info(f"Department grouping is **{dept_label}** (set on first upload).")
@@ -415,6 +418,9 @@ elif st.session_state.tool == "tool2":
                 # Force Amount to numeric in case it was read as text
                 if "Amount" in df.columns:
                     df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+
+                # Capture raw amount sum before grouping for reconciliation
+                st.session_state.tool2_raw_amount_sum += df["Amount"].sum(min_count=1) if "Amount" in df.columns else 0.0
 
                 # Lock first-seen Owner per Property before grouping
                 owner_lookup = df.groupby("Property")["Owner"].first()
@@ -612,6 +618,18 @@ elif st.session_state.tool == "tool2":
         acc = st.session_state.tool2_accumulated.copy()
         n_files = acc["Accounting Period"].nunique()
 
+        # Reconciliation check
+        raw_sum = st.session_state.tool2_raw_amount_sum
+        export_sum = acc["Amount"].sum(min_count=1) if "Amount" in acc.columns else 0.0
+        if abs(raw_sum - export_sum) < 0.01:
+            st.success(f"Reconciliation passed — Amount totals match: {raw_sum:,.2f}")
+        else:
+            st.error(
+                f"Reconciliation failed — Raw files total: {raw_sum:,.2f} | "
+                f"Export total: {export_sum:,.2f} | "
+                f"Difference: {raw_sum - export_sum:,.2f}"
+            )
+
         # Apply Property Owner Type if mapping was provided
         include_owner_type = st.session_state.tool2_owner_type_map is not None
         if include_owner_type:
@@ -653,4 +671,5 @@ elif st.session_state.tool == "tool2":
             st.session_state.tool2_merges = []
             st.session_state.tool2_group_by_dept = False
             st.session_state.tool2_owner_type_map = None
+            st.session_state.tool2_raw_amount_sum = 0.0
             st.rerun()
