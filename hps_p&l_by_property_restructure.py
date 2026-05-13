@@ -391,6 +391,10 @@ elif st.session_state.tool == "tool2":
                 df["Accounting Period"] = df["Date"] + pd.offsets.MonthEnd(0)
                 df = df[df["Accounting Period"].notna()].reset_index(drop=True)
 
+                # Drop rows that groupby would silently discard due to NaN group keys
+                if group_by_dept and "Department" in df.columns:
+                    df = df[df["Department"].notna()].reset_index(drop=True)
+
                 # Create Owner and Property from Name / Class
                 owners = []
                 properties = []
