@@ -131,6 +131,8 @@ if "tool2_merges" not in st.session_state:
     st.session_state.tool2_merges = []
 if "tool2_group_by_dept" not in st.session_state:
     st.session_state.tool2_group_by_dept = False
+if "tool2_owner_type_map" not in st.session_state:
+    st.session_state.tool2_owner_type_map = None  # None = skipped, dict = applied
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -144,6 +146,7 @@ def go_home():
     st.session_state.tool2_accumulated = pd.DataFrame()
     st.session_state.tool2_merges = []
     st.session_state.tool2_group_by_dept = False
+    st.session_state.tool2_owner_type_map = None
 
 
 if st.session_state.tool is None:
@@ -439,7 +442,7 @@ elif st.session_state.tool == "tool2":
         st.success(f"{n_files} file(s) loaded — {len(acc):,} total rows")
         st.dataframe(acc, use_container_width=True)
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("Add Another File", use_container_width=True):
                 st.session_state.tool2_step = "upload"
@@ -449,7 +452,12 @@ elif st.session_state.tool == "tool2":
                 st.session_state.tool2_step = "merge"
                 st.rerun()
         with col3:
+            if st.button("Map Owner Type", use_container_width=True):
+                st.session_state.tool2_step = "owner_type"
+                st.rerun()
+        with col4:
             if st.button("Export", type="primary", use_container_width=True):
+                st.session_state.tool2_owner_type_map = None
                 st.session_state.tool2_step = "export"
                 st.rerun()
 
@@ -513,6 +521,90 @@ elif st.session_state.tool == "tool2":
                 st.session_state.tool2_step = "action"
                 st.rerun()
 
+    # ── STEP: OWNER TYPE MAPPING ──────────────────────────────────────────────
+
+    elif st.session_state.tool2_step == "owner_type":
+
+        OWNED_DEFAULT = {"CBTS LP", "CIF LP", "PBC LP", "KES LP", "CBC LP", "CinCB LP", "SinCB LP"}
+        MGMT_DEFAULT = {"All FL Units"}
+
+        st.subheader("Map Property Owner Type")
+        st.caption(
+            "Assign each Owner to a category. Everything not listed below is mapped as **Third Party**."
+        )
+
+        all_owners = sorted(st.session_state.tool2_accumulated["Owner"].dropna().unique().tolist())
+
+        # Build working map from session state or defaults
+        if st.session_state.tool2_owner_type_map is None:
+            working_map = {}
+            for o in all_owners:
+                if o in OWNED_DEFAULT:
+                    working_map[o] = "Owned"
+                elif o in MGMT_DEFAULT:
+                    working_map[o] = "SICB Management"
+                else:
+                    working_map[o] = "Third Party"
+        else:
+            working_map = dict(st.session_state.tool2_owner_type_map)
+            for o in all_owners:
+                if o not in working_map:
+                    working_map[o] = "Third Party"
+
+        st.write("**Current mapping** (only Owned and SICB Management shown — all others are Third Party):")
+
+        owned_owners = [o for o, t in working_map.items() if t == "Owned"]
+        mgmt_owners = [o for o, t in working_map.items() if t == "SICB Management"]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Owned**")
+            for o in owned_owners:
+                st.markdown(f"- `{o}`")
+        with col2:
+            st.markdown("**SICB Management**")
+            for o in mgmt_owners:
+                st.markdown(f"- `{o}`")
+
+        st.divider()
+        st.write("**Add or change a mapping:**")
+
+        third_party_owners = [o for o in all_owners if working_map.get(o) == "Third Party"]
+
+        if third_party_owners:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                owner_to_add = st.selectbox(
+                    "Select an Owner (currently Third Party)",
+                    options=third_party_owners,
+                    key="owner_type_select",
+                )
+            with col_b:
+                new_type = st.radio(
+                    "Map to",
+                    options=["Owned", "SICB Management"],
+                    key="owner_type_radio",
+                    horizontal=True,
+                )
+            if st.button("Add Mapping", type="primary"):
+                working_map[owner_to_add] = new_type
+                st.session_state.tool2_owner_type_map = working_map
+                st.rerun()
+        else:
+            st.info("All owners are already mapped.")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True):
+                st.session_state.tool2_step = "action"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Export", type="primary", use_container_width=True):
+                st.session_state.tool2_owner_type_map = working_map
+                st.session_state.tool2_step = "export"
+                st.rerun()
+
     # ── STEP: EXPORT ──────────────────────────────────────────────────────────
 
     elif st.session_state.tool2_step == "export":
@@ -520,10 +612,22 @@ elif st.session_state.tool == "tool2":
         acc = st.session_state.tool2_accumulated.copy()
         n_files = acc["Accounting Period"].nunique()
 
+        # Apply Property Owner Type if mapping was provided
+        include_owner_type = st.session_state.tool2_owner_type_map is not None
+        if include_owner_type:
+            owner_type_map = st.session_state.tool2_owner_type_map
+            acc["Property Owner Type"] = acc["Owner"].map(lambda o: owner_type_map.get(o, "Third Party"))
+
         include_dept = "_group_by_dept" in acc.columns and acc["_group_by_dept"].any()
-        columns_to_keep = ["Accounting Period", "Account", "Department", "Property", "Owner", "Amount"] if include_dept else ["Accounting Period", "Account", "Property", "Owner", "Amount"]
+        base_cols = ["Accounting Period", "Account", "Department", "Property", "Owner"] if include_dept else ["Accounting Period", "Account", "Property", "Owner"]
+        if include_owner_type:
+            base_cols = base_cols + ["Property Owner Type", "Amount"]
+        else:
+            base_cols = base_cols + ["Amount"]
+        columns_to_keep = base_cols
         df_export = acc[[col for col in columns_to_keep if col in acc.columns]]
 
+        df_export = df_export.copy()
         df_export["Owner"] = '="' + df_export["Owner"].astype(str).str.replace('"', '""') + '"'
         df_export["Property"] = '="' + df_export["Property"].astype(str).str.replace('"', '""') + '"'
 
@@ -548,4 +652,5 @@ elif st.session_state.tool == "tool2":
             st.session_state.tool2_accumulated = pd.DataFrame()
             st.session_state.tool2_merges = []
             st.session_state.tool2_group_by_dept = False
+            st.session_state.tool2_owner_type_map = None
             st.rerun()
