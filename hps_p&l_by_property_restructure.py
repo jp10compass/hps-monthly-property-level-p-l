@@ -349,6 +349,8 @@ elif st.session_state.tool == "tool2":
             n = st.session_state.tool2_accumulated["Accounting Period"].nunique()
             st.info(f"{n} file(s) already loaded. Upload the next file.")
 
+        group_by_dept = st.checkbox("Group by Department", value=False)
+
         uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
 
         if uploaded_file is not None:
@@ -406,10 +408,11 @@ elif st.session_state.tool == "tool2":
                 owner_lookup = df.groupby("Property")["Owner"].first()
 
                 # Group by Accounting Period + Account + Property, sum numeric columns
-                group_keys = ["Accounting Period", "Account", "Property", "Department"]
+                group_keys = ["Accounting Period", "Account", "Property", "Department"] if group_by_dept else ["Accounting Period", "Account", "Property"]
                 numeric_cols = df.select_dtypes(include="number").columns.tolist()
                 df = df.groupby(group_keys, as_index=False)[numeric_cols].sum()
                 df["Owner"] = df["Property"].map(owner_lookup)
+                df["_group_by_dept"] = group_by_dept
 
             st.session_state.tool2_accumulated = pd.concat(
                 [st.session_state.tool2_accumulated, df], ignore_index=True
@@ -508,7 +511,8 @@ elif st.session_state.tool == "tool2":
         acc = st.session_state.tool2_accumulated.copy()
         n_files = acc["Accounting Period"].nunique()
 
-        columns_to_keep = ["Accounting Period", "Account", "Department", "Property", "Owner", "Amount"]
+        include_dept = "_group_by_dept" in acc.columns and acc["_group_by_dept"].any()
+        columns_to_keep = ["Accounting Period", "Account", "Department", "Property", "Owner", "Amount"] if include_dept else ["Accounting Period", "Account", "Property", "Owner", "Amount"]
         df_export = acc[[col for col in columns_to_keep if col in acc.columns]]
 
         df_export["Owner"] = '="' + df_export["Owner"].astype(str).str.replace('"', '""') + '"'
