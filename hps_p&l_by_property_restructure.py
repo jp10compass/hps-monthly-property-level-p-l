@@ -387,8 +387,9 @@ elif st.session_state.tool == "tool2":
                 df = df.reset_index(drop=True)
 
                 # Create Accounting Period from Date
-                df["Date"] = pd.to_datetime(df["Date"])
+                df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
                 df["Accounting Period"] = df["Date"] + pd.offsets.MonthEnd(0)
+                df = df[df["Accounting Period"].notna()].reset_index(drop=True)
 
                 # Create Owner and Property from Name / Class
                 owners = []
