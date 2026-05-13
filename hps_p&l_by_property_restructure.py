@@ -129,6 +129,8 @@ if "tool2_accumulated" not in st.session_state:
     st.session_state.tool2_accumulated = pd.DataFrame()
 if "tool2_merges" not in st.session_state:
     st.session_state.tool2_merges = []
+if "tool2_group_by_dept" not in st.session_state:
+    st.session_state.tool2_group_by_dept = False
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -141,6 +143,7 @@ def go_home():
     st.session_state.tool2_step = "upload"
     st.session_state.tool2_accumulated = pd.DataFrame()
     st.session_state.tool2_merges = []
+    st.session_state.tool2_group_by_dept = False
 
 
 if st.session_state.tool is None:
@@ -349,7 +352,13 @@ elif st.session_state.tool == "tool2":
             n = st.session_state.tool2_accumulated["Accounting Period"].nunique()
             st.info(f"{n} file(s) already loaded. Upload the next file.")
 
-        group_by_dept = st.checkbox("Group by Department", value=False)
+        if st.session_state.tool2_accumulated.empty:
+            st.session_state.tool2_group_by_dept = st.checkbox("Group by Department", value=False)
+        else:
+            dept_label = "on" if st.session_state.tool2_group_by_dept else "off"
+            st.info(f"Department grouping is **{dept_label}** (set on first upload).")
+
+        group_by_dept = st.session_state.tool2_group_by_dept
 
         uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
 
@@ -538,4 +547,5 @@ elif st.session_state.tool == "tool2":
             st.session_state.tool2_step = "upload"
             st.session_state.tool2_accumulated = pd.DataFrame()
             st.session_state.tool2_merges = []
+            st.session_state.tool2_group_by_dept = False
             st.rerun()
