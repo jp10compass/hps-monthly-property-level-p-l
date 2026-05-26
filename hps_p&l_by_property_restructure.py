@@ -137,6 +137,20 @@ if "tool2_owner_type_map" not in st.session_state:
     st.session_state.tool2_owner_type_map = None  # None = skipped, dict = applied
 if "tool2_raw_amount_sum" not in st.session_state:
     st.session_state.tool2_raw_amount_sum = 0.0
+if "tool3_step" not in st.session_state:
+    st.session_state.tool3_step = "upload"
+if "tool3_accumulated" not in st.session_state:
+    st.session_state.tool3_accumulated = pd.DataFrame()
+if "tool3_merges" not in st.session_state:
+    st.session_state.tool3_merges = []
+if "tool3_group_by_dept" not in st.session_state:
+    st.session_state.tool3_group_by_dept = False
+if "tool3_owner_type_map" not in st.session_state:
+    st.session_state.tool3_owner_type_map = None
+if "tool3_raw_amount_sum" not in st.session_state:
+    st.session_state.tool3_raw_amount_sum = 0.0
+if "tool3_account_map" not in st.session_state:
+    st.session_state.tool3_account_map = None
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -152,6 +166,13 @@ def go_home():
     st.session_state.tool2_group_by_dept = False
     st.session_state.tool2_owner_type_map = None
     st.session_state.tool2_raw_amount_sum = 0.0
+    st.session_state.tool3_step = "upload"
+    st.session_state.tool3_accumulated = pd.DataFrame()
+    st.session_state.tool3_merges = []
+    st.session_state.tool3_group_by_dept = False
+    st.session_state.tool3_owner_type_map = None
+    st.session_state.tool3_raw_amount_sum = 0.0
+    st.session_state.tool3_account_map = None
 
 
 if st.session_state.tool is None:
@@ -159,7 +180,7 @@ if st.session_state.tool is None:
     st.write("Select a tool to get started.")
     st.divider()
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.subheader("P&L by Property Data - Based on Monthly P&L by Property")
         st.caption("P&L by Property Data - Based on Monthly P&L by Property")
@@ -171,6 +192,12 @@ if st.session_state.tool is None:
         st.caption("P&L by Property Data - Based on GL Report")
         if st.button("Open", key="open_tool2", use_container_width=True, type="primary"):
             st.session_state.tool = "tool2"
+            st.rerun()
+    with col3:
+        st.subheader("Company Expenses Data Prep")
+        st.caption("Company Expenses Data Prep")
+        if st.button("Open", key="open_tool3", use_container_width=True, type="primary"):
+            st.session_state.tool = "tool3"
             st.rerun()
 
 
@@ -681,4 +708,520 @@ elif st.session_state.tool == "tool2":
             st.session_state.tool2_group_by_dept = False
             st.session_state.tool2_owner_type_map = None
             st.session_state.tool2_raw_amount_sum = 0.0
+            st.rerun()
+
+
+TOOL3_DEFAULT_ACCOUNT_MAP = {
+    "Booking Income": "Booking Income",
+    "Cleaning Fees": "Cleaning Income",
+    "Credit Card Income": "Credit Card Income",
+    "Damage Income": "Damage Income",
+    "Linen Program Fee Income": "Linen Program Fee",
+    "Management Fee Income": "Management Fee Income",
+    "Markup - Appliance": "Markups",
+    "Markup - Cleaning": "Markups",
+    "Markup - Guest Expenses": "Markups",
+    "Markup - Locks": "Markups",
+    "Markup - Materials": "Markups",
+    "Markup - Postage": "Markups",
+    "Markup - Repair Labor": "Markups",
+    "Markup - Unit Inventory": "Markups",
+    "Markups": "Markups",
+    "Airbnb Booking Fee": "Other Revenue",
+    "Booking.com Commission": "Other Revenue",
+    "Break Fee Income": "Other Revenue",
+    "Cancellation Insurance": "Other Revenue",
+    "Chargeback": "Other Revenue",
+    "Early/Late Fee Check In/Out": "Other Revenue",
+    "Expedia Commission": "Other Revenue",
+    "Float Fees Forfeited": "Other Revenue",
+    "Home Away Commission": "Other Revenue",
+    "Lease Application Fee": "Other Revenue",
+    "Occupancy Violation": "Other Revenue",
+    "Pool Heating": "Other Revenue",
+    "Referral Income": "Other Revenue",
+    "Refund Cancellation": "Other Revenue",
+    "Reimbursed Income": "Other Revenue",
+    "Rentals United Commission": "Other Revenue",
+    "Storage Locker Rental Income": "Other Revenue",
+    "Trip Insurance": "Other Revenue",
+    "Pet Fees": "Pet Fees",
+    "Rent": "Rental Income",
+    "Credit Card Fees": "Other COGS",
+    "Guest Expenses": "Other COGS",
+    "Linen Program Fee": "Other COGS",
+    "Owners Proceed": "Owners Rental Proceeds",
+    "Owners Reimbursement": "Other COGS",
+    "Health Insurance": "Insurance",
+    "Property-Liability Insurance": "Insurance",
+    "Bad debt": "Other G&A",
+    "Bank Service Charges": "Other G&A",
+    "Break Fee": "Other G&A",
+    "Delivery": "Other G&A",
+    "Lease Application Fees": "Other G&A",
+    "Licenses and Permits": "Licenses and Permits",
+    "Management Fee Adjustment": "Other G&A",
+    "Management Fees": "Management Fee Expense",
+    "Not Collected Sales Tax": "Other G&A",
+    "Office Supplies": "Other G&A",
+    "Penalty Expense": "Other G&A",
+    "Postage & Delivery": "Other G&A",
+    "Rent Expenses": "Other G&A",
+    "Accounting Fees": "Professional Fees",
+    "Consulting": "Professional Fees",
+    "Legal Fees": "Professional Fees",
+    "Professional Fees": "Professional Fees",
+    "VA Subcontractor": "Professional Fees",
+    "Cable/Internet": "Telephone & Utilities",
+    "Fax": "Telephone & Utilities",
+    "Phone": "Telephone & Utilities",
+    "Entertainment": "Travel & Entertainment",
+    "Meals": "Travel & Entertainment",
+    "Travel": "Travel & Entertainment",
+    "Electricity & Heat": "Telephone & Utilities",
+    "Gas Utility": "Telephone & Utilities",
+    "Water & Sewer": "Telephone & Utilities",
+    "Paid Time Off": "Payroll Costs",
+    "Payroll Accounting": "Payroll Costs",
+    "Payroll Bonus": "Payroll Costs",
+    "Payroll Clearing": "Payroll Costs",
+    "Payroll Fees": "Payroll Costs",
+    "Payroll Guest Services": "Payroll Costs",
+    "Payroll Inter Company": "Payroll Costs",
+    "Payroll Marketing": "Payroll Costs",
+    "Payroll Mgmt": "Payroll Costs",
+    "Payroll Operations": "Payroll Costs",
+    "Payroll Overtime": "Payroll Costs",
+    "Payroll Owner Services": "Payroll Costs",
+    "Payroll Taxes": "Payroll Costs",
+    "Payroll Vacation": "Payroll Costs",
+    "Worker's Compensation": "Payroll Costs",
+    "Conference": "Professional Development",
+    "Training": "Professional Development",
+    "Recruiting Expense": "Recruiting Expense",
+    "Cleaning Inspector": "Cleaning",
+    "Cleaning Supplies": "Cleaning",
+    "Cleaning Units": "Cleaning",
+    "Garage Cleaning": "Cleaning",
+    "Laundry Attendant Payroll": "Cleaning",
+    "Linen Inventory": "Cleaning",
+    "Unit Inventory": "Cleaning",
+    "AC Filters": "Maintenance",
+    "Appliances": "Maintenance",
+    "Auto Allowance": "Maintenance",
+    "Consumables": "Maintenance",
+    "Electric": "Maintenance",
+    "Furniture & Decorations": "Maintenance",
+    "Garage Maintenance": "Maintenance",
+    "HVAC Repairs": "Maintenance",
+    "Landscape Expense": "Maintenance",
+    "Materials": "Maintenance",
+    "Moveable": "Maintenance",
+    "Plumbing": "Maintenance",
+    "Repairs": "Maintenance",
+    "Subcontractor": "Maintenance",
+    "Trash Removal": "Maintenance",
+    "Cleaning Slippage": "Slippage",
+    "Inventory Slippage": "Slippage",
+    "Linen Slippage": "Slippage",
+    "Maintenance Slippage": "Slippage",
+    "Equipment Rental": "Transportation & Equipment",
+    "Gas & Maintenance": "Transportation & Equipment",
+    "Truck Rental": "Transportation & Equipment",
+    "Advertising": "Ad & Marketing",
+    "Marketing": "Ad & Marketing",
+    "OTA Fees": "Ad & Marketing",
+    "Referral Bonus": "Ad & Marketing",
+    "Sign on Bonus": "Ad & Marketing",
+    "Staff Promotion": "Ad & Marketing",
+    "Staging Bonus": "Ad & Marketing",
+    "Unit Photos": "Ad & Marketing",
+    "Website Fees": "Ad & Marketing",
+    "Dues and Subscriptions": "Dues and Subscriptions",
+    "Software": "Software",
+    "Admin OH Expenses Split by Unit": "Other Expense",
+    "Insurance Reimbursement": "Other Expense",
+    "Interest Expense": "Other Expense",
+    "R&M OH Expenses Split by Unit": "Other Expense",
+    "Transfer FROM Float Fees": "Other Expense",
+    "Transfer FROM Reserve Funds": "Other Expense",
+    "Transfer FROM Unit": "Other Expense",
+    "Write Off": "Other Expense",
+    "Interest Income": "Other Income",
+    "Other Income Drew": "Other Income",
+    "Tax Collection Allowance": "Other Income",
+    "Transfer TO Float Fees": "Other Income",
+    "Transfer TO Reserve Fund": "Other Income",
+    "Transfer TO Unit": "Other Income",
+}
+
+TOOL3_EXPENSE_CATEGORIES = sorted(set(TOOL3_DEFAULT_ACCOUNT_MAP.values()))
+
+
+### ── TOOL 3: COMPANY EXPENSES DATA PREP ─────────────────────────────────────
+
+elif st.session_state.tool == "tool3":
+
+    import csv
+
+    st.title("Company Expenses Data Prep")
+    if st.button("← Back to Menu", key="back_tool3"):
+        go_home()
+        st.rerun()
+
+    st.divider()
+
+    # ── STEP: UPLOAD ──────────────────────────────────────────────────────────
+
+    if st.session_state.tool3_step == "upload":
+
+        if not st.session_state.tool3_accumulated.empty:
+            n = st.session_state.tool3_accumulated["Accounting Period"].nunique()
+            st.info(f"{n} file(s) already loaded. Upload the next file.")
+
+        uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"], key="tool3_uploader")
+
+        if uploaded_file is not None:
+            with st.spinner("Processing..."):
+                df = pd.read_excel(uploaded_file, header=None)
+
+                # Remove first 3 rows, use 4th row as header
+                df = df.iloc[3:].reset_index(drop=True)
+                df.columns = df.iloc[0]
+                df = df[1:].reset_index(drop=True)
+
+                # Remove first 4 columns
+                df = df.iloc[:, 4:]
+
+                # Remove rows where Account is empty
+                df.columns = df.columns.str.strip()
+                df = df[df["Account"].notna()]
+                df = df[df["Account"] != ""]
+                df = df.reset_index(drop=True)
+
+                # Create Accounting Period from Date
+                df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+                df["Accounting Period"] = df["Date"] + pd.offsets.MonthEnd(0)
+                df = df[df["Accounting Period"].notna()].reset_index(drop=True)
+
+                # Create Owner and Property from Name / Class
+                owners = []
+                properties = []
+                for _, row in df.iterrows():
+                    name_value = str(row["Name"])
+                    class_value = str(row["Class"])
+                    if ":" in name_value:
+                        parts = name_value.split(":", 1)
+                        owners.append(parts[0].strip())
+                        properties.append(parts[1].strip())
+                    elif ":" in class_value:
+                        parts = class_value.split(":", 1)
+                        owners.append(parts[0].strip())
+                        properties.append(parts[1].strip())
+                    else:
+                        owners.append(class_value.strip())
+                        properties.append(class_value.strip())
+
+                df["Owner"] = owners
+                df["Property"] = properties
+
+                # Clean Owner and Property
+                df["Owner"] = df["Owner"].str.replace(" -C$", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
+                df["Property"] = df["Property"].str.replace("XXX", "", regex=False).str.replace(r"\.\d{2}", "", regex=True).str.strip().str.replace(r"\s+", " ", regex=True)
+
+                # Force Amount to numeric in case it was read as text
+                if "Amount" in df.columns:
+                    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+
+                # Capture raw amount sum for reconciliation
+                st.session_state.tool3_raw_amount_sum += df["Amount"].sum(min_count=1) if "Amount" in df.columns else 0.0
+
+            st.session_state.tool3_accumulated = pd.concat(
+                [st.session_state.tool3_accumulated, df], ignore_index=True
+            )
+            st.session_state.tool3_step = "action"
+            st.rerun()
+
+    # ── STEP: ACTION ──────────────────────────────────────────────────────────
+
+    elif st.session_state.tool3_step == "action":
+
+        acc = st.session_state.tool3_accumulated
+        n_files = acc["Accounting Period"].nunique()
+
+        st.success(f"{n_files} file(s) loaded — {len(acc):,} total rows")
+        st.dataframe(acc, use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Add Another File", use_container_width=True, key="tool3_add_file"):
+                st.session_state.tool3_step = "upload"
+                st.rerun()
+        with col2:
+            if st.button("Continue →", type="primary", use_container_width=True, key="tool3_continue"):
+                st.session_state.tool3_step = "account_mapping"
+                st.rerun()
+
+    # ── STEP: ACCOUNT MAPPING ─────────────────────────────────────────────────
+
+    elif st.session_state.tool3_step == "account_mapping":
+
+        st.subheader("Map Accounts to Expense Category")
+        st.caption(
+            "Review the default mapping below. Accounts not in the default list are shown prominently — "
+            "assign them a category before continuing."
+        )
+
+        all_accounts = sorted(st.session_state.tool3_accumulated["Account"].dropna().unique().tolist())
+
+        # Build working map from session state or defaults
+        if st.session_state.tool3_account_map is None:
+            working_map = {a: TOOL3_DEFAULT_ACCOUNT_MAP.get(a, "Uncategorized") for a in all_accounts}
+        else:
+            working_map = dict(st.session_state.tool3_account_map)
+            for a in all_accounts:
+                if a not in working_map:
+                    working_map[a] = TOOL3_DEFAULT_ACCOUNT_MAP.get(a, "Uncategorized")
+
+        unmapped = [a for a in all_accounts if working_map.get(a) == "Uncategorized"]
+        mapped = [a for a in all_accounts if working_map.get(a) != "Uncategorized"]
+
+        # Show unmapped accounts prominently
+        if unmapped:
+            st.error(
+                f"**{len(unmapped)} account(s) are unmapped and must be assigned a category before you can continue:**\n\n"
+                + "\n".join(f"- `{a}`" for a in unmapped)
+            )
+            st.divider()
+            st.write("**Assign a category to an unmapped account:**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                account_to_map = st.selectbox(
+                    "Select unmapped account",
+                    options=unmapped,
+                    key="tool3_unmap_select",
+                )
+            with col_b:
+                new_cat = st.selectbox(
+                    "Assign category",
+                    options=TOOL3_EXPENSE_CATEGORIES,
+                    key="tool3_unmap_cat",
+                )
+            if st.button("Map Account", type="primary", key="tool3_map_account"):
+                working_map[account_to_map] = new_cat
+                st.session_state.tool3_account_map = working_map
+                st.rerun()
+            st.divider()
+        else:
+            st.success(f"All {len(all_accounts)} accounts are mapped.")
+
+        # Show current mapping grouped by category
+        if mapped:
+            st.write("**Current mapping (accounts in your data):**")
+            by_category = {}
+            for a in mapped:
+                cat = working_map[a]
+                by_category.setdefault(cat, []).append(a)
+            for cat in sorted(by_category):
+                st.markdown(f"**{cat}**")
+                for a in by_category[cat]:
+                    st.markdown(f"- `{a}`")
+
+        st.divider()
+        st.write("**Change an existing mapping:**")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            account_to_change = st.selectbox(
+                "Select account",
+                options=all_accounts,
+                key="tool3_change_account",
+            )
+        with col_b:
+            current_cat = working_map.get(account_to_change, "Uncategorized")
+            cat_options = TOOL3_EXPENSE_CATEGORIES
+            default_idx = cat_options.index(current_cat) if current_cat in cat_options else 0
+            new_cat_change = st.selectbox(
+                "New category",
+                options=cat_options,
+                index=default_idx,
+                key="tool3_change_cat",
+            )
+        if st.button("Update Mapping", key="tool3_update_mapping"):
+            working_map[account_to_change] = new_cat_change
+            st.session_state.tool3_account_map = working_map
+            st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool3_acctmap_back"):
+                st.session_state.tool3_step = "action"
+                st.rerun()
+        with col2:
+            if unmapped:
+                st.button(
+                    "Apply & Continue →",
+                    type="primary",
+                    use_container_width=True,
+                    key="tool3_acctmap_apply",
+                    disabled=True,
+                )
+                st.caption("Map all accounts above before continuing.")
+            else:
+                if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool3_acctmap_apply"):
+                    st.session_state.tool3_account_map = working_map
+                    st.session_state.tool3_step = "owner_type"
+                    st.rerun()
+
+    # ── STEP: OWNER TYPE MAPPING ──────────────────────────────────────────────
+
+    elif st.session_state.tool3_step == "owner_type":
+
+        OWNED_DEFAULT = {"CBTS LP", "CIF LP", "PBC LP", "KES LP", "CBC LP", "CinCB LP", "SinCB LP"}
+        MGMT_DEFAULT = {"All FL Units"}
+
+        st.subheader("Map Property Owner Type")
+        st.caption(
+            "Assign each Owner to a category. Everything not listed below is mapped as **Third Party**."
+        )
+
+        all_owners = sorted(st.session_state.tool3_accumulated["Owner"].dropna().unique().tolist())
+
+        if st.session_state.tool3_owner_type_map is None:
+            working_map = {}
+            for o in all_owners:
+                if o in OWNED_DEFAULT:
+                    working_map[o] = "Owned"
+                elif o in MGMT_DEFAULT:
+                    working_map[o] = "SICB Management"
+                else:
+                    working_map[o] = "Third Party"
+        else:
+            working_map = dict(st.session_state.tool3_owner_type_map)
+            for o in all_owners:
+                if o not in working_map:
+                    working_map[o] = "Third Party"
+
+        st.write("**Current mapping** (only Owned and SICB Management shown — all others are Third Party):")
+
+        owned_owners = [o for o, t in working_map.items() if t == "Owned"]
+        mgmt_owners = [o for o, t in working_map.items() if t == "SICB Management"]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Owned**")
+            for o in owned_owners:
+                st.markdown(f"- `{o}`")
+        with col2:
+            st.markdown("**SICB Management**")
+            for o in mgmt_owners:
+                st.markdown(f"- `{o}`")
+
+        st.divider()
+        st.write("**Add or change a mapping:**")
+
+        third_party_owners = [o for o in all_owners if working_map.get(o) == "Third Party"]
+
+        if third_party_owners:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                owner_to_add = st.selectbox(
+                    "Select an Owner (currently Third Party)",
+                    options=third_party_owners,
+                    key="tool3_owner_type_select",
+                )
+            with col_b:
+                new_type = st.radio(
+                    "Map to",
+                    options=["Owned", "SICB Management"],
+                    key="tool3_owner_type_radio",
+                    horizontal=True,
+                )
+            if st.button("Add Mapping", type="primary", key="tool3_add_mapping"):
+                working_map[owner_to_add] = new_type
+                st.session_state.tool3_owner_type_map = working_map
+                st.rerun()
+        else:
+            st.info("All owners are already mapped.")
+
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool3_owner_back"):
+                st.session_state.tool3_step = "account_mapping"
+                st.rerun()
+        with col2:
+            if st.button("Skip (no owner type column)", use_container_width=True, key="tool3_owner_skip"):
+                st.session_state.tool3_owner_type_map = None
+                st.session_state.tool3_step = "export"
+                st.rerun()
+        with col3:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool3_owner_apply"):
+                st.session_state.tool3_owner_type_map = working_map
+                st.session_state.tool3_step = "export"
+                st.rerun()
+
+    # ── STEP: EXPORT ──────────────────────────────────────────────────────────
+
+    elif st.session_state.tool3_step == "export":
+
+        acc = st.session_state.tool3_accumulated.copy()
+        n_files = acc["Accounting Period"].nunique()
+
+        # Reconciliation check
+        raw_sum = st.session_state.tool3_raw_amount_sum
+        export_sum = acc["Amount"].sum(min_count=1) if "Amount" in acc.columns else 0.0
+        if abs(raw_sum - export_sum) < 0.01:
+            st.success(f"Reconciliation passed — Amount totals match: {raw_sum:,.2f}")
+        else:
+            st.error(
+                f"Reconciliation failed — Raw files total: {raw_sum:,.2f} | "
+                f"Export total: {export_sum:,.2f} | "
+                f"Difference: {raw_sum - export_sum:,.2f}"
+            )
+
+        # Apply Expense Category from account mapping
+        account_map = st.session_state.tool3_account_map or {}
+        acc["Expense Category"] = acc["Account"].map(lambda a: account_map.get(a, "Uncategorized"))
+
+        # Apply Property Owner Type if mapping was provided
+        include_owner_type = st.session_state.tool3_owner_type_map is not None
+        if include_owner_type:
+            owner_type_map = st.session_state.tool3_owner_type_map
+            acc["Property Owner Type"] = acc["Owner"].map(lambda o: owner_type_map.get(o, "Third Party"))
+
+        columns_to_keep = ["Accounting Period", "Account", "Department", "Property", "Owner"]
+        if include_owner_type:
+            columns_to_keep.append("Property Owner Type")
+        columns_to_keep += ["Expense Category", "Memo", "Source Name", "Amount"]
+
+        df_export = acc[[col for col in columns_to_keep if col in acc.columns]].copy()
+
+        df_export["Owner"] = '="' + df_export["Owner"].astype(str).str.replace('"', '""') + '"'
+        df_export["Property"] = '="' + df_export["Property"].astype(str).str.replace('"', '""') + '"'
+
+        csv_data = df_export.to_csv(index=False, quoting=csv.QUOTE_MINIMAL).encode("utf-8")
+
+        st.success(f"Ready to export — {len(df_export):,} rows across {n_files} file(s)")
+        st.dataframe(df_export, use_container_width=True)
+
+        st.download_button(
+            label="Download CSV",
+            data=csv_data,
+            file_name="company_expenses.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        if st.button("Restart", use_container_width=True, key="tool3_restart"):
+            st.session_state.tool3_step = "upload"
+            st.session_state.tool3_accumulated = pd.DataFrame()
+            st.session_state.tool3_merges = []
+            st.session_state.tool3_group_by_dept = False
+            st.session_state.tool3_owner_type_map = None
+            st.session_state.tool3_raw_amount_sum = 0.0
+            st.session_state.tool3_account_map = None
             st.rerun()
