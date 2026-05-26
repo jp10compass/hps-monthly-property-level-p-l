@@ -1190,6 +1190,40 @@ elif st.session_state.tool == "tool3":
             owner_type_map = st.session_state.tool3_owner_type_map
             acc["Property Owner Type"] = acc["Owner"].map(lambda o: owner_type_map.get(o, "Third Party"))
 
+        # ── FILTER BY EXPENSE CATEGORY ────────────────────────────────────────
+        all_expense_categories = sorted(acc["Expense Category"].dropna().unique().tolist())
+
+        st.subheader("Filter by Expense Category")
+        st.caption("All categories are selected by default — deselect any you want to exclude from the export.")
+
+        # Initialize or validate session state for the multiselect
+        if "tool3_cat_multiselect" not in st.session_state:
+            st.session_state["tool3_cat_multiselect"] = all_expense_categories
+        else:
+            valid = [c for c in st.session_state["tool3_cat_multiselect"] if c in all_expense_categories]
+            if set(valid) != set(st.session_state["tool3_cat_multiselect"]):
+                st.session_state["tool3_cat_multiselect"] = all_expense_categories
+
+        col_sel, col_desel = st.columns(2)
+        with col_sel:
+            if st.button("Select All", key="tool3_cat_select_all", use_container_width=True):
+                st.session_state["tool3_cat_multiselect"] = all_expense_categories
+                st.rerun()
+        with col_desel:
+            if st.button("Deselect All", key="tool3_cat_desel_all", use_container_width=True):
+                st.session_state["tool3_cat_multiselect"] = []
+                st.rerun()
+
+        selected_categories = st.multiselect(
+            "Expense Categories to include in export",
+            options=all_expense_categories,
+            key="tool3_cat_multiselect",
+        )
+
+        acc = acc[acc["Expense Category"].isin(selected_categories)].copy()
+
+        st.divider()
+
         columns_to_keep = ["Accounting Period", "Account", "Department", "Property", "Owner"]
         if include_owner_type:
             columns_to_keep.append("Property Owner Type")
@@ -1202,17 +1236,23 @@ elif st.session_state.tool == "tool3":
 
         csv_data = df_export.to_csv(index=False, quoting=csv.QUOTE_MINIMAL).encode("utf-8")
 
-        st.success(f"Ready to export — {len(df_export):,} rows across {n_files} file(s)")
-        st.dataframe(df_export, use_container_width=True)
+        if not selected_categories:
+            st.warning("No categories selected — select at least one category above to export.")
+        else:
+            n_selected = len(selected_categories)
+            n_total = len(all_expense_categories)
+            category_label = f"all {n_total} categories" if n_selected == n_total else f"{n_selected} of {n_total} categories"
+            st.success(f"Ready to export — {len(df_export):,} rows across {n_files} file(s) · {category_label}")
+            st.dataframe(df_export, use_container_width=True)
 
-        st.download_button(
-            label="Download CSV",
-            data=csv_data,
-            file_name="company_expenses.csv",
-            mime="text/csv",
-            type="primary",
-            use_container_width=True,
-        )
+            st.download_button(
+                label="Download CSV",
+                data=csv_data,
+                file_name="company_expenses.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True,
+            )
 
         st.divider()
 
@@ -1224,4 +1264,5 @@ elif st.session_state.tool == "tool3":
             st.session_state.tool3_owner_type_map = None
             st.session_state.tool3_raw_amount_sum = 0.0
             st.session_state.tool3_account_map = None
+            st.session_state.pop("tool3_cat_multiselect", None)
             st.rerun()
