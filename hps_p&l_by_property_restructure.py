@@ -1070,6 +1070,65 @@ elif st.session_state.tool == "tool3":
             else:
                 if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool3_acctmap_apply"):
                     st.session_state.tool3_account_map = working_map
+                    st.session_state.tool3_step = "dept_remap"
+                    st.rerun()
+
+    # ── STEP: DEPARTMENT REMAPPING ────────────────────────────────────────────
+
+    elif st.session_state.tool3_step == "dept_remap":
+
+        st.subheader("Rename Department Values")
+        st.caption("Each department found in your data is shown below. Edit any name you want to rename — leave as-is to keep it unchanged.")
+
+        acc = st.session_state.tool3_accumulated
+        all_departments = sorted(acc["Department"].dropna().unique().tolist()) if "Department" in acc.columns else []
+
+        if not all_departments:
+            st.info("No Department values found in the data.")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("← Back", use_container_width=True, key="tool3_dept_back"):
+                    st.session_state.tool3_step = "account_mapping"
+                    st.rerun()
+            with col2:
+                if st.button("Continue →", type="primary", use_container_width=True, key="tool3_dept_apply"):
+                    st.session_state.tool3_step = "owner_type"
+                    st.rerun()
+        else:
+            if st.session_state.get("tool3_dept_remap") is None:
+                working_remap = {d: d for d in all_departments}
+            else:
+                working_remap = dict(st.session_state.tool3_dept_remap)
+                for d in all_departments:
+                    if d not in working_remap:
+                        working_remap[d] = d
+
+            sorted_depts = sorted(working_remap.keys())
+
+            for i, dept in enumerate(sorted_depts):
+                key = f"tool3_dept_input_{i}"
+                if key not in st.session_state:
+                    st.session_state[key] = working_remap[dept]
+
+            st.write(f"**{len(sorted_depts)} department(s) found:**")
+            cols = st.columns(2)
+            for i, dept in enumerate(sorted_depts):
+                with cols[i % 2]:
+                    st.text_input(f"`{dept}`", key=f"tool3_dept_input_{i}")
+
+            st.divider()
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("← Back", use_container_width=True, key="tool3_dept_back"):
+                    st.session_state.tool3_step = "account_mapping"
+                    st.rerun()
+            with col2:
+                if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool3_dept_apply"):
+                    new_remap = {}
+                    for i, dept in enumerate(sorted_depts):
+                        new_name = st.session_state.get(f"tool3_dept_input_{i}", dept).strip() or dept
+                        new_remap[dept] = new_name
+                    st.session_state.tool3_dept_remap = new_remap
                     st.session_state.tool3_step = "owner_type"
                     st.rerun()
 
@@ -1148,7 +1207,7 @@ elif st.session_state.tool == "tool3":
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("← Back", use_container_width=True, key="tool3_owner_back"):
-                st.session_state.tool3_step = "account_mapping"
+                st.session_state.tool3_step = "dept_remap"
                 st.rerun()
         with col2:
             if st.button("Skip (no owner type column)", use_container_width=True, key="tool3_owner_skip"):
@@ -1190,13 +1249,53 @@ elif st.session_state.tool == "tool3":
             owner_type_map = st.session_state.tool3_owner_type_map
             acc["Property Owner Type"] = acc["Owner"].map(lambda o: owner_type_map.get(o, "Third Party"))
 
+        # Apply Department remap if provided
+        if st.session_state.get("tool3_dept_remap") and "Department" in acc.columns:
+            dept_remap = st.session_state.tool3_dept_remap
+            acc["Department"] = acc["Department"].map(
+                lambda d: dept_remap.get(str(d).strip(), str(d)) if pd.notna(d) else d
+            )
+
+        # ── FILTER BY ACCOUNTING PERIOD ───────────────────────────────────────
+        all_periods = sorted(acc["Accounting Period"].dropna().unique().tolist(), key=lambda x: str(x))
+
+        st.subheader("Filter by Accounting Period")
+        st.caption("All periods are selected by default — deselect any you want to exclude from the export.")
+
+        if "tool3_period_multiselect" not in st.session_state:
+            st.session_state["tool3_period_multiselect"] = all_periods
+        else:
+            valid_p = [p for p in st.session_state["tool3_period_multiselect"] if p in all_periods]
+            if set(valid_p) != set(st.session_state["tool3_period_multiselect"]):
+                st.session_state["tool3_period_multiselect"] = all_periods
+
+        col_sel_p, col_desel_p = st.columns(2)
+        with col_sel_p:
+            if st.button("Select All", key="tool3_period_select_all", use_container_width=True):
+                st.session_state["tool3_period_multiselect"] = all_periods
+                st.rerun()
+        with col_desel_p:
+            if st.button("Deselect All", key="tool3_period_desel_all", use_container_width=True):
+                st.session_state["tool3_period_multiselect"] = []
+                st.rerun()
+
+        selected_periods = st.multiselect(
+            "Accounting Periods to include in export",
+            options=all_periods,
+            key="tool3_period_multiselect",
+            format_func=lambda x: str(x),
+        )
+
+        acc = acc[acc["Accounting Period"].isin(selected_periods)].copy()
+
+        st.divider()
+
         # ── FILTER BY EXPENSE CATEGORY ────────────────────────────────────────
         all_expense_categories = sorted(acc["Expense Category"].dropna().unique().tolist())
 
         st.subheader("Filter by Expense Category")
         st.caption("All categories are selected by default — deselect any you want to exclude from the export.")
 
-        # Initialize or validate session state for the multiselect
         if "tool3_cat_multiselect" not in st.session_state:
             st.session_state["tool3_cat_multiselect"] = all_expense_categories
         else:
@@ -1236,13 +1335,16 @@ elif st.session_state.tool == "tool3":
 
         csv_data = df_export.to_csv(index=False, quoting=csv.QUOTE_MINIMAL).encode("utf-8")
 
-        if not selected_categories:
-            st.warning("No categories selected — select at least one category above to export.")
+        if not selected_periods or not selected_categories:
+            st.warning("No periods or categories selected — select at least one of each above to export.")
         else:
-            n_selected = len(selected_categories)
-            n_total = len(all_expense_categories)
-            category_label = f"all {n_total} categories" if n_selected == n_total else f"{n_selected} of {n_total} categories"
-            st.success(f"Ready to export — {len(df_export):,} rows across {n_files} file(s) · {category_label}")
+            n_sel_p = len(selected_periods)
+            n_tot_p = len(all_periods)
+            n_sel_c = len(selected_categories)
+            n_tot_c = len(all_expense_categories)
+            period_label = f"all {n_tot_p} periods" if n_sel_p == n_tot_p else f"{n_sel_p} of {n_tot_p} periods"
+            category_label = f"all {n_tot_c} categories" if n_sel_c == n_tot_c else f"{n_sel_c} of {n_tot_c} categories"
+            st.success(f"Ready to export — {len(df_export):,} rows · {period_label} · {category_label}")
             st.dataframe(df_export, use_container_width=True)
 
             st.download_button(
@@ -1264,5 +1366,9 @@ elif st.session_state.tool == "tool3":
             st.session_state.tool3_owner_type_map = None
             st.session_state.tool3_raw_amount_sum = 0.0
             st.session_state.tool3_account_map = None
+            st.session_state.tool3_dept_remap = None
+            for k in [k for k in st.session_state if k.startswith("tool3_dept_input_")]:
+                del st.session_state[k]
+            st.session_state.pop("tool3_period_multiselect", None)
             st.session_state.pop("tool3_cat_multiselect", None)
             st.rerun()
