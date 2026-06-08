@@ -292,6 +292,8 @@ if "tool2_owner_type_map" not in st.session_state:
     st.session_state.tool2_owner_type_map = None  # None = skipped, dict = applied
 if "tool2_raw_amount_sum" not in st.session_state:
     st.session_state.tool2_raw_amount_sum = 0.0
+if "tool2_raw_transactions" not in st.session_state:
+    st.session_state.tool2_raw_transactions = pd.DataFrame()
 if "tool3_step" not in st.session_state:
     st.session_state.tool3_step = "upload"
 if "tool3_accumulated" not in st.session_state:
@@ -321,6 +323,7 @@ def go_home():
     st.session_state.tool2_group_by_dept = False
     st.session_state.tool2_owner_type_map = None
     st.session_state.tool2_raw_amount_sum = 0.0
+    st.session_state.tool2_raw_transactions = pd.DataFrame()
     st.session_state.tool3_step = "upload"
     st.session_state.tool3_accumulated = pd.DataFrame()
     st.session_state.tool3_merges = []
@@ -621,6 +624,11 @@ elif st.session_state.tool == "tool2":
                 # Capture raw amount sum before grouping for reconciliation
                 st.session_state.tool2_raw_amount_sum += df["Amount"].sum(min_count=1) if "Amount" in df.columns else 0.0
 
+                # Save pre-grouped transactions for audit export
+                st.session_state.tool2_raw_transactions = pd.concat(
+                    [st.session_state.tool2_raw_transactions, df.copy()], ignore_index=True
+                )
+
                 # Lock first-seen Owner per Property before grouping
                 owner_lookup = df.groupby("Property")["Owner"].first()
 
@@ -865,6 +873,28 @@ elif st.session_state.tool == "tool2":
 
         st.divider()
 
+        st.subheader("Audit — Raw Transactions")
+        st.caption("All individual transactions before grouping, with Owner, Property, and Property Owner Type columns appended.")
+
+        raw_audit = st.session_state.tool2_raw_transactions.copy()
+        if include_owner_type and not raw_audit.empty:
+            raw_audit["Property Owner Type"] = raw_audit["Owner"].map(lambda o: owner_type_map.get(o, "Third Party"))
+
+        audit_cols_to_drop = [c for c in ["_group_by_dept", "Accounting Period"] if c in raw_audit.columns]
+        raw_audit = raw_audit.drop(columns=audit_cols_to_drop, errors="ignore")
+
+        st.dataframe(raw_audit, use_container_width=True)
+        csv_audit = raw_audit.to_csv(index=False, quoting=csv.QUOTE_MINIMAL).encode("utf-8")
+        st.download_button(
+            label="Download Raw Transactions CSV",
+            data=csv_audit,
+            file_name="raw_transactions_audit.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+        st.divider()
+
         if st.button("Restart", use_container_width=True):
             st.session_state.tool2_step = "upload"
             st.session_state.tool2_accumulated = pd.DataFrame()
@@ -872,6 +902,7 @@ elif st.session_state.tool == "tool2":
             st.session_state.tool2_group_by_dept = False
             st.session_state.tool2_owner_type_map = None
             st.session_state.tool2_raw_amount_sum = 0.0
+            st.session_state.tool2_raw_transactions = pd.DataFrame()
             st.rerun()
 
 
