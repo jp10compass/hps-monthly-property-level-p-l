@@ -580,16 +580,25 @@ elif st.session_state.tool == "tool2":
                 if group_by_dept and "Department" in df.columns:
                     df["Department"] = df["Department"].fillna("Unassigned")
 
-                # Create Owner and Property from Name / Class
+                # Create Owner and Property from Name / Class / Memo
+                _OWNED_ENTITIES = ["CBTS LP", "CIF LP", "PBC LP", "KES LP", "CBC LP", "CinCB LP", "SinCB LP"]
+                _MEMO_OWNER_RE = re.compile(
+                    r'(' + '|'.join(re.escape(e) for e in _OWNED_ENTITIES) + r'):([A-Za-z]+\s+\d+)'
+                )
                 owners = []
                 properties = []
                 for _, row in df.iterrows():
                     name_value = str(row["Name"])
                     class_value = str(row["Class"])
+                    memo_value = str(row["Memo"]) if "Memo" in df.columns and pd.notna(row.get("Memo")) else ""
+                    memo_match = _MEMO_OWNER_RE.search(memo_value)
                     if ":" in name_value:
                         parts = name_value.split(":", 1)
                         owners.append(parts[0].strip())
                         properties.append(parts[1].strip())
+                    elif memo_match:
+                        owners.append(memo_match.group(1).strip())
+                        properties.append(memo_match.group(2).strip())
                     elif ":" in class_value:
                         parts = class_value.split(":", 1)
                         owners.append(parts[0].strip())
@@ -718,7 +727,7 @@ elif st.session_state.tool == "tool2":
     elif st.session_state.tool2_step == "owner_type":
 
         OWNED_DEFAULT = {"CBTS LP", "CIF LP", "PBC LP", "KES LP", "CBC LP", "CinCB LP", "SinCB LP"}
-        MGMT_DEFAULT = {"All FL Units"}
+        MGMT_DEFAULT = {"SICB Management"}
 
         st.subheader("Map Property Owner Type")
         st.caption(
