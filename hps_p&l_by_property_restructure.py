@@ -356,31 +356,61 @@ if st.session_state.tool is None:
     st.write("Select a tool to get started.")
     st.divider()
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.subheader("P&L by Property Data - Based on Monthly P&L by Property")
-        st.caption("P&L by Property Data - Based on Monthly P&L by Property")
-        if st.button("Open", key="open_pnl", use_container_width=True, type="primary"):
-            st.session_state.tool = "pnl_restructure"
-            st.rerun()
-    with col2:
-        st.subheader("P&L by Property Data - Based on GL Report")
-        st.caption("P&L by Property Data - Based on GL Report")
-        if st.button("Open", key="open_tool2", use_container_width=True, type="primary"):
-            st.session_state.tool = "tool2"
-            st.rerun()
-    with col3:
-        st.subheader("Company Expenses Data Prep")
-        st.caption("Company Expenses Data Prep")
-        if st.button("Open", key="open_tool3", use_container_width=True, type="primary"):
-            st.session_state.tool = "tool3"
-            st.rerun()
-    with col4:
-        st.subheader("SICB Management Expense Allocation")
-        st.caption("Allocate SICB Management expenses to properties by active unit count")
-        if st.button("Open", key="open_tool4", use_container_width=True, type="primary"):
-            st.session_state.tool = "tool4"
-            st.rerun()
+    TOOLS = [
+        {
+            "key": "open_pnl",
+            "tool": "pnl_restructure",
+            "title": "P&L by Property",
+            "subtitle": "Based on Monthly P&L by Property",
+            "description": "Upload monthly P&L by Property Excel files, process one or more months, and export in long or wide CSV format.",
+        },
+        {
+            "key": "open_tool2",
+            "tool": "tool2",
+            "title": "P&L by Property",
+            "subtitle": "Based on GL Report",
+            "description": "Upload GL Report Excel files, merge properties, map owner types, and export a clean flat CSV with reconciliation check.",
+        },
+        {
+            "key": "open_tool3",
+            "tool": "tool3",
+            "title": "Company Expenses",
+            "subtitle": "Data Prep",
+            "description": "Upload GL expense files, map accounts to expense categories, rename departments, and export with period and category filters.",
+        },
+        {
+            "key": "open_tool4",
+            "tool": "tool4",
+            "title": "SICB Management",
+            "subtitle": "Expense Allocation",
+            "description": "Allocate SICB Management expenses to individual properties based on active unit count per month.",
+        },
+    ]
+
+    card_style = """
+        <style>
+        div[data-testid="stVerticalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] {
+            height: 100%;
+        }
+        </style>
+    """
+    st.markdown(card_style, unsafe_allow_html=True)
+
+    row1 = st.columns(3, gap="large")
+    row2_cols = st.columns(3, gap="large")
+    row2 = [row2_cols[0]]
+
+    all_slots = row1 + row2
+
+    for i, tool in enumerate(TOOLS):
+        with all_slots[i]:
+            with st.container(border=True):
+                st.markdown(f"#### {tool['title']}")
+                st.caption(tool["subtitle"])
+                st.write(tool["description"])
+                if st.button("Open", key=tool["key"], use_container_width=True, type="primary"):
+                    st.session_state.tool = tool["tool"]
+                    st.rerun()
 
 
 ### ── TOOL 1: P&L BY PROPERTY RESTRUCTURE ────────────────────────────────────
