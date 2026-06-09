@@ -1693,18 +1693,19 @@ elif st.session_state.tool == "tool4":
                 (units_df["Offboarded Date"].isna() | (units_df["Offboarded Date"] > month))
             ]
             row = {"Accounting Period": month.date()}
+            row["Total"] = len(active)
+            row["Third Party"] = int((active["Owner Type"] == "Third Party").sum())
+            row["SICB Management"] = int((active["Owner Type"] == "SICB Management").sum())
             row["Owned"] = int((active["Owner Type"] == "Owned").sum())
             for entity in owned_entities:
                 row[f"Owned - {entity}"] = int(
                     ((active["Owner Type"] == "Owned") & (active["Owner"] == entity)).sum()
                 )
-            row["SICB Management"] = int((active["Owner Type"] == "SICB Management").sum())
-            row["Third Party"] = int((active["Owner Type"] == "Third Party").sum())
             unit_count_rows.append(row)
         unit_count_df = pd.DataFrame(unit_count_rows)
         st.dataframe(unit_count_df, use_container_width=True)
 
-        if unit_count_df["Total Units"].eq(0).any():
+        if unit_count_df["Total"].eq(0).any():
             st.warning("Some months have 0 active units — those expense rows will be excluded from the output.")
 
         st.divider()
