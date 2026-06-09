@@ -269,6 +269,36 @@ TOOL3_DEFAULT_ACCOUNT_MAP = {
 
 TOOL3_EXPENSE_CATEGORIES = sorted(set(TOOL3_DEFAULT_ACCOUNT_MAP.values()))
 
+TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS = [
+    "Paid Time Off",
+    "Payroll Clearing",
+    "Payroll Fees",
+    "Payroll Inter Company",
+    "Payroll Mgmt",
+    "Payroll Overtime",
+    "Payroll Taxes",
+    "Payroll Vacation",
+    "Worker's Compensation",
+    "Parental Leave Time Off",
+    "Cable/Internet",
+    "Fax",
+    "Phone",
+    "Health Insurance",
+    "Bonuses",
+    "Dues and Subscriptions",
+    "Software",
+    "Accounting Fees",
+    "Consulting",
+    "Legal Fees",
+    "Professional Fees",
+    "VA Subcontractor",
+]
+
+TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS = [
+    "Owner Success:Owner Sales",
+    "Owner Success:Owner Service",
+]
+
 
 ### ── SESSION STATE INIT ──────────────────────────────────────────────────────
 
@@ -320,6 +350,12 @@ if "tool4_account_mode_map" not in st.session_state:
     st.session_state.tool4_account_mode_map = {}
 if "tool4_unit_owner_overrides" not in st.session_state:
     st.session_state.tool4_unit_owner_overrides = {}
+if "tool4_dept_filter_accounts" not in st.session_state:
+    st.session_state.tool4_dept_filter_accounts = list(TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS)
+if "tool4_dept_filter_departments" not in st.session_state:
+    st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
+if "tool4_missing_overrides" not in st.session_state:
+    st.session_state.tool4_missing_overrides = {}
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -349,6 +385,9 @@ def go_home():
     st.session_state.tool4_result_df = pd.DataFrame()
     st.session_state.tool4_account_mode_map = {}
     st.session_state.tool4_unit_owner_overrides = {}
+    st.session_state.tool4_dept_filter_accounts = list(TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS)
+    st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
+    st.session_state.tool4_missing_overrides = {}
 
 
 if st.session_state.tool is None:
@@ -1558,7 +1597,7 @@ elif st.session_state.tool == "tool4":
                 units_df = pd.read_csv(units_file)
 
                 # Filter to SICB Management only
-                expenses_df = expenses_df[expenses_df["Property Owner Type"] == "SICB Management"].copy()
+                expenses_df = expenses_df[expenses_df["Property Owner Type"].isin(["SICB Management", "All FL Units"])].copy()
                 expenses_df["Accounting Period"] = pd.to_datetime(expenses_df["Accounting Period"], errors="coerce")
                 expenses_df = expenses_df[expenses_df["Accounting Period"].notna()].reset_index(drop=True)
                 expenses_df["Accounting Period"] = expenses_df["Accounting Period"] + pd.offsets.MonthEnd(0)
@@ -1674,7 +1713,7 @@ elif st.session_state.tool == "tool4":
 
         n_rows = len(expenses_df)
         n_months = expenses_df["Accounting Period"].nunique()
-        st.success(f"{n_rows:,} SICB Management expense rows across {n_months} month(s)")
+        st.success(f"{n_rows:,} expense rows loaded across {n_months} month(s)")
 
         st.subheader("Filtered Expenses Preview")
         st.dataframe(expenses_df, use_container_width=True)
@@ -1718,6 +1757,75 @@ elif st.session_state.tool == "tool4":
                 st.rerun()
         with col2:
             if st.button("Continue →", type="primary", use_container_width=True, key="tool4_continue"):
+                st.session_state.tool4_step = "dept_accounts"
+                st.rerun()
+
+    # ── STEP: DEPT FILTER ACCOUNTS ────────────────────────────────────────────
+
+    elif st.session_state.tool4_step == "dept_accounts":
+
+        st.subheader("Department-Based Allocation")
+        st.caption(
+            "Transactions for the accounts below will be allocated to **Third Party units only** "
+            "if their department matches one of the listed departments. "
+            "All other departments for these accounts are allocated across all units."
+        )
+
+        dept_filter_accounts = list(st.session_state.tool4_dept_filter_accounts)
+        dept_filter_departments = list(st.session_state.tool4_dept_filter_departments)
+
+        st.write("**Departments → Third Party Only:**")
+        for i, dept in enumerate(dept_filter_departments):
+            col_d, col_r = st.columns([6, 1])
+            with col_d:
+                st.code(dept)
+            with col_r:
+                if st.button("Remove", key=f"tool4_remove_dept_{i}"):
+                    dept_filter_departments.pop(i)
+                    st.session_state.tool4_dept_filter_departments = dept_filter_departments
+                    st.rerun()
+
+        new_dept = st.text_input("Add a department", key="tool4_new_dept_input")
+        if st.button("Add Department", key="tool4_add_dept"):
+            nd = new_dept.strip()
+            if nd and nd not in dept_filter_departments:
+                dept_filter_departments.append(nd)
+                st.session_state.tool4_dept_filter_departments = dept_filter_departments
+                st.rerun()
+
+        st.divider()
+
+        st.write("**Accounts subject to department-based allocation:**")
+        for i, acct in enumerate(dept_filter_accounts):
+            col_a, col_r = st.columns([6, 1])
+            with col_a:
+                st.markdown(f"- `{acct}`")
+            with col_r:
+                if st.button("Remove", key=f"tool4_remove_acct_{i}"):
+                    dept_filter_accounts.pop(i)
+                    st.session_state.tool4_dept_filter_accounts = dept_filter_accounts
+                    st.rerun()
+
+        all_expense_accounts = sorted(st.session_state.tool4_expenses_df["Account"].dropna().unique().tolist())
+        addable_accounts = [a for a in all_expense_accounts if a not in dept_filter_accounts]
+        if addable_accounts:
+            add_acct = st.selectbox("Add an account", options=[""] + addable_accounts, key="tool4_add_acct_select")
+            if st.button("Add Account", key="tool4_add_acct_btn"):
+                if add_acct and add_acct not in dept_filter_accounts:
+                    dept_filter_accounts.append(add_acct)
+                    st.session_state.tool4_dept_filter_accounts = dept_filter_accounts
+                    st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool4_dept_back"):
+                st.session_state.tool4_step = "action"
+                st.rerun()
+        with col2:
+            if st.button("Continue →", type="primary", use_container_width=True, key="tool4_dept_continue"):
+                st.session_state.tool4_dept_filter_accounts = dept_filter_accounts
+                st.session_state.tool4_dept_filter_departments = dept_filter_departments
                 st.session_state.tool4_step = "account_mode"
                 st.rerun()
 
@@ -1725,126 +1833,207 @@ elif st.session_state.tool == "tool4":
 
     elif st.session_state.tool4_step == "account_mode":
 
-        TOOL4_MODES = ["All Units", "Owned Only", "Third Party Only", "Keep as SICB Management"]
+        TOOL4_OVERRIDE_MODES = ["Owned Only", "Third Party Only", "Keep as SICB Management"]
 
         st.subheader("Account Allocation Mode")
         st.caption(
-            "Set how each account's expenses are allocated. "
-            "**All Units** (default) splits across every active unit. "
-            "**Owned Only** / **Third Party Only** splits only across that portfolio. "
-            "**Keep as SICB Management** passes the row through with no split."
+            "All remaining accounts are split across **All Units** by default. "
+            "Override specific accounts below."
         )
 
         expenses_df = st.session_state.tool4_expenses_df
+        dept_filter_accounts = st.session_state.tool4_dept_filter_accounts
         all_accounts = sorted(expenses_df["Account"].dropna().unique().tolist())
+        remaining_accounts = [a for a in all_accounts if a not in dept_filter_accounts]
 
-        # Build working map from session state or default everything to "All Units"
-        if st.session_state.tool4_account_mode_map:
-            working_map = dict(st.session_state.tool4_account_mode_map)
-            for a in all_accounts:
-                if a not in working_map:
-                    working_map[a] = "All Units"
+        working_map = {k: v for k, v in st.session_state.tool4_account_mode_map.items() if k in remaining_accounts}
+
+        owned_only = [a for a in remaining_accounts if working_map.get(a) == "Owned Only"]
+        tp_only = [a for a in remaining_accounts if working_map.get(a) == "Third Party Only"]
+        sicb_only = [a for a in remaining_accounts if working_map.get(a) == "Keep as SICB Management"]
+
+        if owned_only or tp_only or sicb_only:
+            st.write("**Current overrides:**")
+            for label, lst in [("Owned Only", owned_only), ("Third Party Only", tp_only), ("Keep as SICB Management", sicb_only)]:
+                if lst:
+                    st.markdown(f"*{label}*")
+                    for a in lst:
+                        col_a, col_r = st.columns([6, 1])
+                        with col_a:
+                            st.markdown(f"- `{a}`")
+                        with col_r:
+                            if st.button("Remove", key=f"tool4_rm_override_{a}"):
+                                working_map.pop(a, None)
+                                st.session_state.tool4_account_mode_map = working_map
+                                st.rerun()
+            st.divider()
+
+        overridable = [a for a in remaining_accounts if a not in working_map]
+        if overridable:
+            st.write("**Add an override:**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                account_to_override = st.selectbox("Account", options=overridable, key="tool4_override_account")
+            with col_b:
+                override_mode = st.selectbox("Mode", options=TOOL4_OVERRIDE_MODES, key="tool4_override_mode")
+            if st.button("Add Override", type="primary", key="tool4_add_override"):
+                working_map[account_to_override] = override_mode
+                st.session_state.tool4_account_mode_map = working_map
+                st.rerun()
         else:
-            working_map = {a: "All Units" for a in all_accounts}
-
-        # Display current mapping grouped by mode
-        st.write("**Current mapping:**")
-        for mode in TOOL4_MODES:
-            accounts_in_mode = [a for a in all_accounts if working_map.get(a) == mode]
-            if accounts_in_mode:
-                st.markdown(f"**{mode}** ({len(accounts_in_mode)})")
-                for a in accounts_in_mode:
-                    st.markdown(f"- `{a}`")
-
-        st.divider()
-        st.write("**Change an account's mode:**")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            account_to_change = st.selectbox(
-                "Select account",
-                options=all_accounts,
-                key="tool4_mode_account_select",
-            )
-        with col_b:
-            current_mode = working_map.get(account_to_change, "All Units")
-            new_mode = st.selectbox(
-                "Allocation mode",
-                options=TOOL4_MODES,
-                index=TOOL4_MODES.index(current_mode),
-                key="tool4_mode_select",
-            )
-        if st.button("Update", key="tool4_mode_update"):
-            working_map[account_to_change] = new_mode
-            st.session_state.tool4_account_mode_map = working_map
-            st.rerun()
+            st.info("All accounts have overrides.")
 
         st.divider()
         col1, col2 = st.columns(2)
         with col1:
             if st.button("← Back", use_container_width=True, key="tool4_mode_back"):
-                st.session_state.tool4_step = "action"
+                st.session_state.tool4_step = "dept_accounts"
                 st.rerun()
         with col2:
             if st.button("Allocate & Continue →", type="primary", use_container_width=True, key="tool4_mode_apply"):
                 st.session_state.tool4_account_mode_map = working_map
                 units_df = st.session_state.tool4_units_df
+                dept_filter_accts = st.session_state.tool4_dept_filter_accounts
+                dept_filter_depts = st.session_state.tool4_dept_filter_departments
                 months = sorted(expenses_df["Accounting Period"].dropna().unique())
 
                 with st.spinner("Allocating expenses..."):
                     output_chunks = []
                     for month in months:
-                        month_expenses = expenses_df[expenses_df["Accounting Period"] == month][["Account", "Amount"]].copy()
+                        cols_needed = [c for c in ["Account", "Department", "Amount"] if c in expenses_df.columns]
+                        month_expenses = expenses_df[expenses_df["Accounting Period"] == month][cols_needed].copy()
                         all_active = units_df[
                             (units_df["Purchase/Onboarded Date"].notna()) &
                             (units_df["Purchase/Onboarded Date"] <= month) &
                             (units_df["Offboarded Date"].isna() | (units_df["Offboarded Date"] > month))
-                        ][["QuickBooks Name", "Owner Name", "Owner Type"]].copy()
+                        ][["QuickBooks Name", "Owner", "Owner Type"]].copy()
 
                         for _, exp_row in month_expenses.iterrows():
                             account = exp_row["Account"]
                             amount = exp_row["Amount"]
-                            owner = exp_row.get("Owner", "")
-                            owner_type = exp_row.get("Property Owner Type", "")
-                            mode = working_map.get(account, "All Units")
+                            _dept = exp_row.get("Department", "")
+                            department = "" if pd.isna(_dept) else str(_dept).strip()
 
-                            if mode == "Keep as SICB Management":
-                                output_chunks.append(pd.DataFrame([{
-                                    "Accounting Period": month.date(),
-                                    "Account": account,
-                                    "Property": "SICB Management",
-                                    "Allocated Amount": amount,
-                                    "Owner": owner,
-                                    "Property Owner Type": owner_type,
-                                }]))
+                            if account in dept_filter_accts and department in dept_filter_depts:
+                                pool = all_active[all_active["Owner Type"] == "Third Party"].copy()
                             else:
-                                if mode == "Owned Only":
+                                mode = working_map.get(account, "All Units")
+                                if mode == "Keep as SICB Management":
+                                    output_chunks.append(pd.DataFrame([{
+                                        "Accounting Period": month.date(),
+                                        "Account": account,
+                                        "Department": department,
+                                        "Property": "SICB Management",
+                                        "Allocated Amount": amount,
+                                        "Owner": "",
+                                        "Property Owner Type": "SICB Management",
+                                    }]))
+                                    continue
+                                elif mode == "Owned Only":
                                     pool = all_active[all_active["Owner Type"] == "Owned"].copy()
                                 elif mode == "Third Party Only":
                                     pool = all_active[all_active["Owner Type"] == "Third Party"].copy()
                                 else:
                                     pool = all_active.copy()
 
-                                n_units = len(pool)
-                                if n_units == 0:
-                                    continue
+                            n_units = len(pool)
+                            if n_units == 0:
+                                continue
 
-                                exp_single = pd.DataFrame([{"Account": account, "Amount": amount}])
-                                crossed = exp_single.merge(pool[["QuickBooks Name"]], how="cross")
-                                crossed["Allocated Amount"] = crossed["Amount"] / n_units
-                                crossed["Accounting Period"] = month.date()
-                                crossed["Owner"] = owner
-                                crossed["Property Owner Type"] = owner_type
-                                crossed = crossed.rename(columns={"QuickBooks Name": "Property"})
-                                output_chunks.append(
-                                    crossed[["Accounting Period", "Account", "Property", "Allocated Amount", "Owner", "Property Owner Type"]]
-                                )
+                            crossed = pd.DataFrame([{"Account": account, "Department": department, "Amount": amount}]).merge(
+                                pool[["QuickBooks Name", "Owner", "Owner Type"]], how="cross"
+                            )
+                            unit_amount = round(amount / n_units, 2)
+                            allocated = [unit_amount] * n_units
+                            allocated[-1] = round(amount - unit_amount * (n_units - 1), 2)
+                            crossed["Allocated Amount"] = allocated
+                            crossed["Accounting Period"] = month.date()
+                            crossed = crossed.rename(columns={"QuickBooks Name": "Property", "Owner Type": "Property Owner Type"})
+                            output_chunks.append(
+                                crossed[["Accounting Period", "Account", "Department", "Property", "Allocated Amount", "Owner", "Property Owner Type"]]
+                            )
 
                     if output_chunks:
                         result_df = pd.concat(output_chunks, ignore_index=True)
                     else:
-                        result_df = pd.DataFrame(columns=["Accounting Period", "Account", "Property", "Allocated Amount", "Owner", "Property Owner Type"])
+                        result_df = pd.DataFrame(columns=["Accounting Period", "Account", "Department", "Property", "Allocated Amount", "Owner", "Property Owner Type"])
 
                 st.session_state.tool4_result_df = result_df
+                st.session_state.tool4_missing_overrides = {}
+                st.session_state.tool4_step = "missing_check"
+                st.rerun()
+
+    # ── STEP: MISSING OWNER CHECK ─────────────────────────────────────────────
+
+    elif st.session_state.tool4_step == "missing_check":
+
+        result_df = st.session_state.tool4_result_df.copy()
+        overrides = dict(st.session_state.tool4_missing_overrides)
+
+        OWNER_TYPE_OPTIONS = ["Owned", "Third Party", "SICB Management"]
+
+        def _apply_overrides(df, ovr):
+            df = df.copy()
+            for prop, vals in ovr.items():
+                mask = df["Property"] == prop
+                if "Owner" in vals:
+                    df.loc[mask, "Owner"] = vals["Owner"]
+                if "Property Owner Type" in vals:
+                    df.loc[mask, "Property Owner Type"] = vals["Property Owner Type"]
+            return df
+
+        result_df = _apply_overrides(result_df, overrides)
+
+        missing_mask = (
+            result_df["Owner"].isna() | (result_df["Owner"].astype(str).str.strip() == "") |
+            result_df["Property Owner Type"].isna() | (result_df["Property Owner Type"].astype(str).str.strip() == "")
+        )
+        missing_props = sorted(result_df.loc[missing_mask, "Property"].dropna().unique().tolist())
+
+        if not missing_props:
+            st.success("No missing Owner or Property Owner Type — all units are complete.")
+        else:
+            st.warning(f"{len(missing_props)} unit(s) are missing Owner or Property Owner Type:")
+            for p in missing_props:
+                st.markdown(f"- `{p}`")
+
+            st.divider()
+            st.write("**Assign values:**")
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                selected_prop = st.selectbox("Unit (QuickBooks Name)", options=missing_props, key="tool4_missing_prop")
+            with col_b:
+                all_owners = sorted(st.session_state.tool4_units_df["Owner"].dropna().unique().tolist())
+                selected_owner = st.selectbox("Owner", options=[""] + all_owners, key="tool4_missing_owner")
+            with col_c:
+                selected_ot = st.selectbox("Property Owner Type", options=[""] + OWNER_TYPE_OPTIONS, key="tool4_missing_ot")
+
+            if st.button("Assign", type="primary", key="tool4_missing_assign"):
+                entry = overrides.get(selected_prop, {})
+                if selected_owner:
+                    entry["Owner"] = selected_owner
+                if selected_ot:
+                    entry["Property Owner Type"] = selected_ot
+                overrides[selected_prop] = entry
+                st.session_state.tool4_missing_overrides = overrides
+                st.rerun()
+
+        if overrides:
+            st.divider()
+            st.write("**Current assignments:**")
+            for prop, vals in overrides.items():
+                st.markdown(f"- `{prop}` → Owner: **{vals.get('Owner', '—')}** | Type: **{vals.get('Property Owner Type', '—')}**")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool4_missing_back"):
+                st.session_state.tool4_step = "account_mode"
+                st.rerun()
+        with col2:
+            label = "Continue →" if missing_props else "Continue →"
+            if st.button(label, type="primary", use_container_width=True, key="tool4_missing_continue"):
+                st.session_state.tool4_result_df = _apply_overrides(st.session_state.tool4_result_df, overrides)
                 st.session_state.tool4_step = "export"
                 st.rerun()
 
@@ -1853,6 +2042,17 @@ elif st.session_state.tool == "tool4":
     elif st.session_state.tool4_step == "export":
 
         result_df = st.session_state.tool4_result_df
+
+        original_sum = st.session_state.tool4_expenses_df["Amount"].sum(min_count=1)
+        allocated_sum = result_df["Allocated Amount"].sum(min_count=1) if not result_df.empty else 0.0
+        if abs(original_sum - allocated_sum) < 0.01:
+            st.success(f"Reconciliation passed — totals match: {original_sum:,.2f}")
+        else:
+            st.error(
+                f"Reconciliation failed — Original: {original_sum:,.2f} | "
+                f"Allocated: {allocated_sum:,.2f} | "
+                f"Difference: {original_sum - allocated_sum:,.2f}"
+            )
 
         if result_df.empty:
             st.warning("No output rows generated — check that your unit file has active units for the months in your expense file.")
@@ -1879,4 +2079,7 @@ elif st.session_state.tool == "tool4":
             st.session_state.tool4_result_df = pd.DataFrame()
             st.session_state.tool4_account_mode_map = {}
             st.session_state.tool4_unit_owner_overrides = {}
+            st.session_state.tool4_dept_filter_accounts = list(TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS)
+            st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
+            st.session_state.tool4_missing_overrides = {}
             st.rerun()
