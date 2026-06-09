@@ -308,6 +308,18 @@ if "tool3_raw_amount_sum" not in st.session_state:
     st.session_state.tool3_raw_amount_sum = 0.0
 if "tool3_account_map" not in st.session_state:
     st.session_state.tool3_account_map = None
+if "tool4_step" not in st.session_state:
+    st.session_state.tool4_step = "upload"
+if "tool4_expenses_df" not in st.session_state:
+    st.session_state.tool4_expenses_df = pd.DataFrame()
+if "tool4_units_df" not in st.session_state:
+    st.session_state.tool4_units_df = pd.DataFrame()
+if "tool4_result_df" not in st.session_state:
+    st.session_state.tool4_result_df = pd.DataFrame()
+if "tool4_account_mode_map" not in st.session_state:
+    st.session_state.tool4_account_mode_map = {}
+if "tool4_unit_owner_overrides" not in st.session_state:
+    st.session_state.tool4_unit_owner_overrides = {}
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -331,6 +343,12 @@ def go_home():
     st.session_state.tool3_owner_type_map = None
     st.session_state.tool3_raw_amount_sum = 0.0
     st.session_state.tool3_account_map = None
+    st.session_state.tool4_step = "upload"
+    st.session_state.tool4_expenses_df = pd.DataFrame()
+    st.session_state.tool4_units_df = pd.DataFrame()
+    st.session_state.tool4_result_df = pd.DataFrame()
+    st.session_state.tool4_account_mode_map = {}
+    st.session_state.tool4_unit_owner_overrides = {}
 
 
 if st.session_state.tool is None:
@@ -338,7 +356,7 @@ if st.session_state.tool is None:
     st.write("Select a tool to get started.")
     st.divider()
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.subheader("P&L by Property Data - Based on Monthly P&L by Property")
         st.caption("P&L by Property Data - Based on Monthly P&L by Property")
@@ -356,6 +374,12 @@ if st.session_state.tool is None:
         st.caption("Company Expenses Data Prep")
         if st.button("Open", key="open_tool3", use_container_width=True, type="primary"):
             st.session_state.tool = "tool3"
+            st.rerun()
+    with col4:
+        st.subheader("SICB Management Expense Allocation")
+        st.caption("Allocate SICB Management expenses to properties by active unit count")
+        if st.button("Open", key="open_tool4", use_container_width=True, type="primary"):
+            st.session_state.tool = "tool4"
             st.rerun()
 
 
@@ -1419,4 +1443,346 @@ elif st.session_state.tool == "tool3":
                 del st.session_state[k]
             st.session_state.pop("tool3_period_multiselect", None)
             st.session_state.pop("tool3_cat_multiselect", None)
+            st.rerun()
+
+
+### ── TOOL 4: SICB MANAGEMENT EXPENSE ALLOCATION ─────────────────────────────
+
+elif st.session_state.tool == "tool4":
+
+    import csv
+
+    st.title("SICB Management Expense Allocation")
+    if st.button("← Back to Menu", key="back_tool4"):
+        go_home()
+        st.rerun()
+
+    st.divider()
+
+    # ── STEP: UPLOAD ──────────────────────────────────────────────────────────
+
+    if st.session_state.tool4_step == "upload":
+
+        st.write("Upload both files to proceed.")
+        expenses_file = st.file_uploader("Income & Expenses CSV", type=["csv"], key="tool4_expenses_uploader")
+        units_file = st.file_uploader("Property / Units CSV", type=["csv"], key="tool4_units_uploader")
+
+        if expenses_file is not None and units_file is not None:
+            with st.spinner("Loading files..."):
+                expenses_df = pd.read_csv(expenses_file)
+                units_df = pd.read_csv(units_file)
+
+                # Filter to SICB Management only
+                expenses_df = expenses_df[expenses_df["Property Owner Type"] == "SICB Management"].copy()
+                expenses_df["Accounting Period"] = pd.to_datetime(expenses_df["Accounting Period"], errors="coerce")
+                expenses_df = expenses_df[expenses_df["Accounting Period"].notna()].reset_index(drop=True)
+                expenses_df["Accounting Period"] = expenses_df["Accounting Period"] + pd.offsets.MonthEnd(0)
+
+                # Parse unit dates
+                units_df["Purchase/Onboarded Date"] = pd.to_datetime(units_df["Purchase/Onboarded Date"], errors="coerce")
+                units_df["Offboarded Date"] = pd.to_datetime(units_df["Offboarded Date"], errors="coerce")
+
+                st.session_state.tool4_expenses_df = expenses_df
+                st.session_state.tool4_units_df = units_df
+
+            st.session_state.tool4_step = "unit_check"
+            st.rerun()
+
+    # ── STEP: UNIT OWNER CHECK ────────────────────────────────────────────────
+
+    elif st.session_state.tool4_step == "unit_check":
+
+        OWNER_TYPE_OPTIONS = ["Owned", "Third Party", "SICB Management"]
+
+        units_df = st.session_state.tool4_units_df
+        overrides = dict(st.session_state.tool4_unit_owner_overrides)
+
+        def _unit_key(row):
+            qb = str(row.get("QuickBooks Name", "")).strip()
+            if qb and qb.lower() != "nan":
+                return qb
+            un = str(row.get("Unit Name", "")).strip()
+            if un and un.lower() != "nan":
+                return un
+            return f"row_{row.name}"
+
+        def _effective_type(row):
+            return overrides.get(_unit_key(row), {}).get("Owner Type") or str(row.get("Owner Type", "")).strip()
+
+        missing_mask = units_df.apply(
+            lambda r: not _effective_type(r) or _effective_type(r).lower() == "nan", axis=1
+        )
+        missing_units = units_df[missing_mask]
+
+        if missing_units.empty:
+            st.success(f"All {len(units_df)} units have Owner Type assigned — no manual mapping needed.")
+        else:
+            st.warning(
+                f"{len(missing_units)} unit(s) are missing Owner Type. "
+                "These will be excluded from **Owned Only** and **Third Party Only** allocation pools unless assigned below."
+            )
+            display_cols = [c for c in ["QuickBooks Name", "Unit Name", "Owner Name", "Owner Type", "Status"] if c in missing_units.columns]
+            st.dataframe(missing_units[display_cols].reset_index(drop=True), use_container_width=True)
+
+            st.divider()
+            st.write("**Assign Owner Type:**")
+
+            unit_labels = []
+            unit_keys = []
+            for _, row in missing_units.iterrows():
+                unit_labels.append(_unit_key(row))
+                unit_keys.append(_unit_key(row))
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                selected_label = st.selectbox(
+                    "Select unit",
+                    options=unit_labels,
+                    key="tool4_unit_check_select",
+                )
+            with col_b:
+                selected_type = st.selectbox(
+                    "Owner Type",
+                    options=OWNER_TYPE_OPTIONS,
+                    key="tool4_unit_check_type",
+                )
+
+            if st.button("Assign", type="primary", key="tool4_unit_check_assign"):
+                overrides[selected_label] = {"Owner Type": selected_type}
+                st.session_state.tool4_unit_owner_overrides = overrides
+                st.rerun()
+
+        if overrides:
+            st.divider()
+            st.write("**Current manual assignments:**")
+            for key, vals in overrides.items():
+                st.markdown(f"- `{key}` → **{vals.get('Owner Type', '')}**")
+            if st.button("Clear All Assignments", key="tool4_unit_check_clear"):
+                st.session_state.tool4_unit_owner_overrides = {}
+                st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool4_unit_check_back"):
+                st.session_state.tool4_step = "upload"
+                st.rerun()
+        with col2:
+            continue_label = "Continue →" if missing_units.empty else "Continue anyway →"
+            if st.button(continue_label, type="primary", use_container_width=True, key="tool4_unit_check_continue"):
+                if overrides:
+                    updated_units = st.session_state.tool4_units_df.copy()
+                    for _, row in updated_units.iterrows():
+                        key = _unit_key(row)
+                        if key in overrides:
+                            updated_units.at[row.name, "Owner Type"] = overrides[key]["Owner Type"]
+                    st.session_state.tool4_units_df = updated_units
+                st.session_state.tool4_step = "action"
+                st.rerun()
+
+    # ── STEP: ACTION ──────────────────────────────────────────────────────────
+
+    elif st.session_state.tool4_step == "action":
+
+        expenses_df = st.session_state.tool4_expenses_df
+        units_df = st.session_state.tool4_units_df
+
+        n_rows = len(expenses_df)
+        n_months = expenses_df["Accounting Period"].nunique()
+        st.success(f"{n_rows:,} SICB Management expense rows across {n_months} month(s)")
+
+        st.subheader("Filtered Expenses Preview")
+        st.dataframe(expenses_df, use_container_width=True)
+
+        st.subheader("Active Unit Count by Month")
+        st.caption("A unit is active if Live Date ≤ last day of month and Offboarded Date is null or after the last day of month.")
+        months = sorted(expenses_df["Accounting Period"].dropna().unique())
+        unit_count_rows = []
+        for month in months:
+            active = units_df[
+                (units_df["Purchase/Onboarded Date"].notna()) &
+                (units_df["Purchase/Onboarded Date"] <= month) &
+                (units_df["Offboarded Date"].isna() | (units_df["Offboarded Date"] > month))
+            ]
+            unit_count_rows.append({
+                "Accounting Period": month.date(),
+                "Active Units": len(active),
+            })
+        unit_count_df = pd.DataFrame(unit_count_rows)
+        st.dataframe(unit_count_df, use_container_width=True)
+
+        if unit_count_df["Active Units"].eq(0).any():
+            st.warning("Some months have 0 active units — those expense rows will be excluded from the output.")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Start Over", use_container_width=True, key="tool4_back_upload"):
+                st.session_state.tool4_step = "upload"
+                st.session_state.tool4_expenses_df = pd.DataFrame()
+                st.session_state.tool4_units_df = pd.DataFrame()
+                st.rerun()
+        with col2:
+            if st.button("Continue →", type="primary", use_container_width=True, key="tool4_continue"):
+                st.session_state.tool4_step = "account_mode"
+                st.rerun()
+
+    # ── STEP: ACCOUNT ALLOCATION MODE ────────────────────────────────────────
+
+    elif st.session_state.tool4_step == "account_mode":
+
+        TOOL4_MODES = ["All Units", "Owned Only", "Third Party Only", "Keep as SICB Management"]
+
+        st.subheader("Account Allocation Mode")
+        st.caption(
+            "Set how each account's expenses are allocated. "
+            "**All Units** (default) splits across every active unit. "
+            "**Owned Only** / **Third Party Only** splits only across that portfolio. "
+            "**Keep as SICB Management** passes the row through with no split."
+        )
+
+        expenses_df = st.session_state.tool4_expenses_df
+        all_accounts = sorted(expenses_df["Account"].dropna().unique().tolist())
+
+        # Build working map from session state or default everything to "All Units"
+        if st.session_state.tool4_account_mode_map:
+            working_map = dict(st.session_state.tool4_account_mode_map)
+            for a in all_accounts:
+                if a not in working_map:
+                    working_map[a] = "All Units"
+        else:
+            working_map = {a: "All Units" for a in all_accounts}
+
+        # Display current mapping grouped by mode
+        st.write("**Current mapping:**")
+        for mode in TOOL4_MODES:
+            accounts_in_mode = [a for a in all_accounts if working_map.get(a) == mode]
+            if accounts_in_mode:
+                st.markdown(f"**{mode}** ({len(accounts_in_mode)})")
+                for a in accounts_in_mode:
+                    st.markdown(f"- `{a}`")
+
+        st.divider()
+        st.write("**Change an account's mode:**")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            account_to_change = st.selectbox(
+                "Select account",
+                options=all_accounts,
+                key="tool4_mode_account_select",
+            )
+        with col_b:
+            current_mode = working_map.get(account_to_change, "All Units")
+            new_mode = st.selectbox(
+                "Allocation mode",
+                options=TOOL4_MODES,
+                index=TOOL4_MODES.index(current_mode),
+                key="tool4_mode_select",
+            )
+        if st.button("Update", key="tool4_mode_update"):
+            working_map[account_to_change] = new_mode
+            st.session_state.tool4_account_mode_map = working_map
+            st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool4_mode_back"):
+                st.session_state.tool4_step = "action"
+                st.rerun()
+        with col2:
+            if st.button("Allocate & Continue →", type="primary", use_container_width=True, key="tool4_mode_apply"):
+                st.session_state.tool4_account_mode_map = working_map
+                units_df = st.session_state.tool4_units_df
+                months = sorted(expenses_df["Accounting Period"].dropna().unique())
+
+                with st.spinner("Allocating expenses..."):
+                    output_chunks = []
+                    for month in months:
+                        month_expenses = expenses_df[expenses_df["Accounting Period"] == month][["Account", "Amount"]].copy()
+                        all_active = units_df[
+                            (units_df["Purchase/Onboarded Date"].notna()) &
+                            (units_df["Purchase/Onboarded Date"] <= month) &
+                            (units_df["Offboarded Date"].isna() | (units_df["Offboarded Date"] > month))
+                        ][["QuickBooks Name", "Owner Name", "Owner Type"]].copy()
+
+                        for _, exp_row in month_expenses.iterrows():
+                            account = exp_row["Account"]
+                            amount = exp_row["Amount"]
+                            owner = exp_row.get("Owner", "")
+                            owner_type = exp_row.get("Property Owner Type", "")
+                            mode = working_map.get(account, "All Units")
+
+                            if mode == "Keep as SICB Management":
+                                output_chunks.append(pd.DataFrame([{
+                                    "Accounting Period": month.date(),
+                                    "Account": account,
+                                    "Property": "SICB Management",
+                                    "Allocated Amount": amount,
+                                    "Owner": owner,
+                                    "Property Owner Type": owner_type,
+                                }]))
+                            else:
+                                if mode == "Owned Only":
+                                    pool = all_active[all_active["Owner Type"] == "Owned"].copy()
+                                elif mode == "Third Party Only":
+                                    pool = all_active[all_active["Owner Type"] == "Third Party"].copy()
+                                else:
+                                    pool = all_active.copy()
+
+                                n_units = len(pool)
+                                if n_units == 0:
+                                    continue
+
+                                exp_single = pd.DataFrame([{"Account": account, "Amount": amount}])
+                                crossed = exp_single.merge(pool[["QuickBooks Name"]], how="cross")
+                                crossed["Allocated Amount"] = crossed["Amount"] / n_units
+                                crossed["Accounting Period"] = month.date()
+                                crossed["Owner"] = owner
+                                crossed["Property Owner Type"] = owner_type
+                                crossed = crossed.rename(columns={"QuickBooks Name": "Property"})
+                                output_chunks.append(
+                                    crossed[["Accounting Period", "Account", "Property", "Allocated Amount", "Owner", "Property Owner Type"]]
+                                )
+
+                    if output_chunks:
+                        result_df = pd.concat(output_chunks, ignore_index=True)
+                    else:
+                        result_df = pd.DataFrame(columns=["Accounting Period", "Account", "Property", "Allocated Amount", "Owner", "Property Owner Type"])
+
+                st.session_state.tool4_result_df = result_df
+                st.session_state.tool4_step = "export"
+                st.rerun()
+
+    # ── STEP: EXPORT ──────────────────────────────────────────────────────────
+
+    elif st.session_state.tool4_step == "export":
+
+        result_df = st.session_state.tool4_result_df
+
+        if result_df.empty:
+            st.warning("No output rows generated — check that your unit file has active units for the months in your expense file.")
+        else:
+            st.success(f"Ready to export — {len(result_df):,} allocated rows")
+            st.dataframe(result_df, use_container_width=True)
+
+            csv_data = result_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download CSV",
+                data=csv_data,
+                file_name="sicb_expense_allocation.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True,
+            )
+
+        st.divider()
+
+        if st.button("Restart", use_container_width=True, key="tool4_restart"):
+            st.session_state.tool4_step = "upload"
+            st.session_state.tool4_expenses_df = pd.DataFrame()
+            st.session_state.tool4_units_df = pd.DataFrame()
+            st.session_state.tool4_result_df = pd.DataFrame()
+            st.session_state.tool4_account_mode_map = {}
+            st.session_state.tool4_unit_owner_overrides = {}
             st.rerun()
