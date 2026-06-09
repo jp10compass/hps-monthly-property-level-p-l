@@ -290,6 +290,7 @@ TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS = [
     "Accounting Fees",
     "Consulting",
     "Legal Fees",
+    "Payroll Owner Services",
     "Professional Fees",
     "VA Subcontractor",
 ]
@@ -2057,10 +2058,19 @@ elif st.session_state.tool == "tool4":
         if result_df.empty:
             st.warning("No output rows generated — check that your unit file has active units for the months in your expense file.")
         else:
-            st.success(f"Ready to export — {len(result_df):,} allocated rows")
-            st.dataframe(result_df, use_container_width=True)
+            include_dept = st.checkbox("Include Department in grouping", value=False, key="tool4_export_include_dept")
+            group_keys = ["Accounting Period", "Account", "Department", "Property"] if include_dept else ["Accounting Period", "Account", "Property"]
+            df_export = (
+                result_df.groupby(group_keys, as_index=False)
+                .agg({"Allocated Amount": "sum", "Owner": "first", "Property Owner Type": "first"})
+            )
+            col_order = group_keys + ["Allocated Amount", "Owner", "Property Owner Type"]
+            df_export = df_export[col_order]
 
-            csv_data = result_df.to_csv(index=False).encode("utf-8")
+            st.success(f"Ready to export — {len(df_export):,} rows")
+            st.dataframe(df_export, use_container_width=True)
+
+            csv_data = df_export.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download CSV",
                 data=csv_data,
