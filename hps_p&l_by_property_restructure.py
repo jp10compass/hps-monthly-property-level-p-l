@@ -1611,6 +1611,10 @@ elif st.session_state.tool == "tool4":
                 # Filter to SICB Management and All FL Units
                 expenses_df = full_expenses_df[full_expenses_df["Property Owner Type"].isin(["SICB Management", "All FL Units"])].copy().reset_index(drop=True)
 
+                # Clean QuickBooks Name decimal suffixes (e.g. "BRR 7.00" → "BRR 7")
+                if "QuickBooks Name" in units_df.columns:
+                    units_df["QuickBooks Name"] = units_df["QuickBooks Name"].astype(str).str.replace(r"\.\d+$", "", regex=True).str.strip()
+
                 # Parse unit dates
                 units_df["Purchase/Onboarded Date"] = pd.to_datetime(units_df["Purchase/Onboarded Date"], errors="coerce")
                 units_df["Offboarded Date"] = pd.to_datetime(units_df["Offboarded Date"], errors="coerce")
@@ -2078,7 +2082,9 @@ elif st.session_state.tool == "tool4":
             st.success(f"Ready to export — {len(df_export):,} rows")
             st.dataframe(df_export, use_container_width=True)
 
-            csv_data = df_export.to_csv(index=False).encode("utf-8")
+            df_export_csv = df_export.copy()
+            df_export_csv["Property"] = '="' + df_export_csv["Property"].astype(str).str.replace('"', '""') + '"'
+            csv_data = df_export_csv.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download CSV",
                 data=csv_data,
@@ -2120,7 +2126,9 @@ elif st.session_state.tool == "tool4":
             st.success(f"{len(combined):,} rows")
             st.dataframe(combined, use_container_width=True)
 
-            csv_combined = combined.to_csv(index=False).encode("utf-8")
+            combined_csv = combined.copy()
+            combined_csv["Property"] = '="' + combined_csv["Property"].astype(str).str.replace('"', '""') + '"'
+            csv_combined = combined_csv.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="Download Combined CSV",
                 data=csv_combined,
