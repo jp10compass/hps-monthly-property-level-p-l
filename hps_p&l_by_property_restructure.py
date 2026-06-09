@@ -357,6 +357,8 @@ if "tool4_dept_filter_departments" not in st.session_state:
     st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
 if "tool4_missing_overrides" not in st.session_state:
     st.session_state.tool4_missing_overrides = {}
+if "tool4_dropped_df" not in st.session_state:
+    st.session_state.tool4_dropped_df = pd.DataFrame()
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -389,6 +391,7 @@ def go_home():
     st.session_state.tool4_dept_filter_accounts = list(TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS)
     st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
     st.session_state.tool4_missing_overrides = {}
+    st.session_state.tool4_dropped_df = pd.DataFrame()
 
 
 if st.session_state.tool is None:
@@ -1597,11 +1600,16 @@ elif st.session_state.tool == "tool4":
                 expenses_df = pd.read_csv(expenses_file)
                 units_df = pd.read_csv(units_file)
 
-                # Filter to SICB Management only
-                expenses_df = expenses_df[expenses_df["Property Owner Type"].isin(["SICB Management", "All FL Units"])].copy()
-                expenses_df["Accounting Period"] = pd.to_datetime(expenses_df["Accounting Period"], errors="coerce")
-                expenses_df = expenses_df[expenses_df["Accounting Period"].notna()].reset_index(drop=True)
-                expenses_df["Accounting Period"] = expenses_df["Accounting Period"] + pd.offsets.MonthEnd(0)
+                # Capture dropped rows before filtering
+                full_expenses_df = expenses_df.copy()
+                full_expenses_df["Accounting Period"] = pd.to_datetime(full_expenses_df["Accounting Period"], errors="coerce")
+                full_expenses_df = full_expenses_df[full_expenses_df["Accounting Period"].notna()].reset_index(drop=True)
+                full_expenses_df["Accounting Period"] = full_expenses_df["Accounting Period"] + pd.offsets.MonthEnd(0)
+                dropped_df = full_expenses_df[~full_expenses_df["Property Owner Type"].isin(["SICB Management", "All FL Units"])].copy()
+                st.session_state.tool4_dropped_df = dropped_df
+
+                # Filter to SICB Management and All FL Units
+                expenses_df = full_expenses_df[full_expenses_df["Property Owner Type"].isin(["SICB Management", "All FL Units"])].copy().reset_index(drop=True)
 
                 # Parse unit dates
                 units_df["Purchase/Onboarded Date"] = pd.to_datetime(units_df["Purchase/Onboarded Date"], errors="coerce")
@@ -2082,6 +2090,45 @@ elif st.session_state.tool == "tool4":
 
         st.divider()
 
+        st.subheader("Combined Export")
+        st.caption(
+            "Allocated rows combined with the original non-SICB/All FL Units transactions, "
+            "grouped by Accounting Period + Account + Property, Department dropped."
+        )
+
+        dropped_df = st.session_state.tool4_dropped_df
+        if not result_df.empty or not dropped_df.empty:
+            allocated_part = result_df.rename(columns={"Allocated Amount": "Amount"})
+            allocated_part = allocated_part[["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"]]
+
+            if not dropped_df.empty:
+                dropped_part = dropped_df.copy()
+                dropped_part["Amount"] = pd.to_numeric(dropped_part["Amount"], errors="coerce")
+                dropped_part = dropped_part[["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"]]
+            else:
+                dropped_part = pd.DataFrame(columns=["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"])
+
+            combined = pd.concat([allocated_part, dropped_part], ignore_index=True)
+            combined = (
+                combined.groupby(["Accounting Period", "Account", "Property"], as_index=False)
+                .agg({"Amount": "sum", "Owner": "first", "Property Owner Type": "first"})
+            )
+
+            st.success(f"{len(combined):,} rows")
+            st.dataframe(combined, use_container_width=True)
+
+            csv_combined = combined.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download Combined CSV",
+                data=csv_combined,
+                file_name="combined_expense_allocation.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True,
+            )
+
+        st.divider()
+
         if st.button("Restart", use_container_width=True, key="tool4_restart"):
             st.session_state.tool4_step = "upload"
             st.session_state.tool4_expenses_df = pd.DataFrame()
@@ -2092,4 +2139,5 @@ elif st.session_state.tool == "tool4":
             st.session_state.tool4_dept_filter_accounts = list(TOOL4_DEFAULT_DEPT_FILTER_ACCOUNTS)
             st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
             st.session_state.tool4_missing_overrides = {}
+            st.session_state.tool4_dropped_df = pd.DataFrame()
             st.rerun()
