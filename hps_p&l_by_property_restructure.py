@@ -1680,9 +1680,11 @@ elif st.session_state.tool == "tool4":
         st.dataframe(expenses_df, use_container_width=True)
 
         st.subheader("Active Unit Count by Month")
-        st.caption("A unit is active if Live Date ≤ last day of month and Offboarded Date is null or after the last day of month.")
+        st.caption("A unit is active if Purchase/Onboarded Date ≤ last day of month and Offboarded Date is null or after the last day of month.")
         months = sorted(expenses_df["Accounting Period"].dropna().unique())
-        owner_types = sorted(units_df["Owner Type"].dropna().unique().tolist())
+        owned_entities = sorted(
+            units_df.loc[units_df["Owner Type"] == "Owned", "Owner"].dropna().unique().tolist()
+        )
         unit_count_rows = []
         for month in months:
             active = units_df[
@@ -1690,9 +1692,14 @@ elif st.session_state.tool == "tool4":
                 (units_df["Purchase/Onboarded Date"] <= month) &
                 (units_df["Offboarded Date"].isna() | (units_df["Offboarded Date"] > month))
             ]
-            row = {"Accounting Period": month.date(), "Total Units": len(active)}
-            for ot in owner_types:
-                row[ot] = int((active["Owner Type"] == ot).sum())
+            row = {"Accounting Period": month.date()}
+            row["Owned"] = int((active["Owner Type"] == "Owned").sum())
+            for entity in owned_entities:
+                row[f"Owned - {entity}"] = int(
+                    ((active["Owner Type"] == "Owned") & (active["Owner"] == entity)).sum()
+                )
+            row["SICB Management"] = int((active["Owner Type"] == "SICB Management").sum())
+            row["Third Party"] = int((active["Owner Type"] == "Third Party").sum())
             unit_count_rows.append(row)
         unit_count_df = pd.DataFrame(unit_count_rows)
         st.dataframe(unit_count_df, use_container_width=True)
