@@ -2098,12 +2098,15 @@ elif st.session_state.tool == "tool4":
 
         dropped_df = st.session_state.tool4_dropped_df
         if not result_df.empty or not dropped_df.empty:
-            allocated_part = result_df.rename(columns={"Allocated Amount": "Amount"})
+            allocated_part = result_df.rename(columns={"Allocated Amount": "Amount"}).copy()
+            allocated_part["Accounting Period"] = pd.to_datetime(allocated_part["Accounting Period"]).dt.to_period("M").dt.to_timestamp("M")
             allocated_part = allocated_part[["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"]]
 
             if not dropped_df.empty:
                 dropped_part = dropped_df.copy()
                 dropped_part["Amount"] = pd.to_numeric(dropped_part["Amount"], errors="coerce")
+                dropped_part["Accounting Period"] = pd.to_datetime(dropped_part["Accounting Period"], errors="coerce") + pd.offsets.MonthEnd(0)
+                dropped_part["Accounting Period"] = dropped_part["Accounting Period"].dt.to_period("M").dt.to_timestamp("M")
                 dropped_part = dropped_part[["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"]]
             else:
                 dropped_part = pd.DataFrame(columns=["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"])
