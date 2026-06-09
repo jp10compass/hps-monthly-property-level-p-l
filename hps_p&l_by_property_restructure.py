@@ -865,11 +865,59 @@ elif st.session_state.tool == "tool2":
         with col2:
             if st.button("Skip (no owner type column)", use_container_width=True):
                 st.session_state.tool2_owner_type_map = None
-                st.session_state.tool2_step = "export"
+                st.session_state.tool2_step = "period_filter"
                 st.rerun()
         with col3:
             if st.button("Apply & Continue →", type="primary", use_container_width=True):
                 st.session_state.tool2_owner_type_map = working_map
+                st.session_state.tool2_step = "period_filter"
+                st.rerun()
+
+    # ── STEP: PERIOD FILTER ───────────────────────────────────────────────────
+
+    elif st.session_state.tool2_step == "period_filter":
+
+        acc = st.session_state.tool2_accumulated
+        all_periods = sorted(acc["Accounting Period"].dropna().unique().tolist(), key=lambda x: str(x))
+
+        st.subheader("Filter Accounting Periods")
+        st.caption("All periods are selected by default — click any period to remove it from the export.")
+
+        if "tool2_period_multiselect" not in st.session_state or not st.session_state["tool2_period_multiselect"]:
+            st.session_state["tool2_period_multiselect"] = all_periods
+
+        col_sel, col_desel = st.columns(2)
+        with col_sel:
+            if st.button("Select All", key="tool2_period_select_all", use_container_width=True):
+                st.session_state["tool2_period_multiselect"] = all_periods
+                st.rerun()
+        with col_desel:
+            if st.button("Deselect All", key="tool2_period_desel_all", use_container_width=True):
+                st.session_state["tool2_period_multiselect"] = []
+                st.rerun()
+
+        selected_periods = st.multiselect(
+            "Accounting periods to include",
+            options=all_periods,
+            key="tool2_period_multiselect",
+            format_func=lambda x: str(x),
+        )
+
+        n_sel = len(selected_periods)
+        n_tot = len(all_periods)
+        if n_sel == 0:
+            st.warning("No periods selected — select at least one to continue.")
+        else:
+            st.info(f"{n_sel} of {n_tot} period(s) selected.")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back", use_container_width=True, key="tool2_period_back"):
+                st.session_state.tool2_step = "owner_type"
+                st.rerun()
+        with col2:
+            if st.button("Continue →", type="primary", use_container_width=True, key="tool2_period_continue", disabled=(n_sel == 0)):
                 st.session_state.tool2_step = "export"
                 st.rerun()
 
@@ -878,6 +926,12 @@ elif st.session_state.tool == "tool2":
     elif st.session_state.tool2_step == "export":
 
         acc = st.session_state.tool2_accumulated.copy()
+
+        # Apply period filter
+        selected_periods = st.session_state.get("tool2_period_multiselect", [])
+        if selected_periods:
+            acc = acc[acc["Accounting Period"].isin(selected_periods)].copy()
+
         n_files = acc["Accounting Period"].nunique()
 
         # Reconciliation check
@@ -957,6 +1011,7 @@ elif st.session_state.tool == "tool2":
             st.session_state.tool2_owner_type_map = None
             st.session_state.tool2_raw_amount_sum = 0.0
             st.session_state.tool2_raw_transactions = pd.DataFrame()
+            st.session_state.pop("tool2_period_multiselect", None)
             st.rerun()
 
 
@@ -1627,6 +1682,7 @@ elif st.session_state.tool == "tool4":
         st.subheader("Active Unit Count by Month")
         st.caption("A unit is active if Live Date ≤ last day of month and Offboarded Date is null or after the last day of month.")
         months = sorted(expenses_df["Accounting Period"].dropna().unique())
+        owner_types = sorted(units_df["Owner Type"].dropna().unique().tolist())
         unit_count_rows = []
         for month in months:
             active = units_df[
@@ -1634,14 +1690,14 @@ elif st.session_state.tool == "tool4":
                 (units_df["Purchase/Onboarded Date"] <= month) &
                 (units_df["Offboarded Date"].isna() | (units_df["Offboarded Date"] > month))
             ]
-            unit_count_rows.append({
-                "Accounting Period": month.date(),
-                "Active Units": len(active),
-            })
+            row = {"Accounting Period": month.date(), "Total Units": len(active)}
+            for ot in owner_types:
+                row[ot] = int((active["Owner Type"] == ot).sum())
+            unit_count_rows.append(row)
         unit_count_df = pd.DataFrame(unit_count_rows)
         st.dataframe(unit_count_df, use_container_width=True)
 
-        if unit_count_df["Active Units"].eq(0).any():
+        if unit_count_df["Total Units"].eq(0).any():
             st.warning("Some months have 0 active units — those expense rows will be excluded from the output.")
 
         st.divider()
