@@ -593,11 +593,22 @@ def tool5_apply_corporate_filter(df):
     return df[keep_mask].copy()
 
 
+def tool5_apply_pnl_sign(df):
+    """Flip Amount's sign for Income/Other Income accounts so revenue displays
+    as positive, matching how the P&L reports show it, rather than the GL's
+    raw Debit-minus-Credit accounting convention (where revenue is negative)."""
+    df = df.copy()
+    df["Amount"] = df.apply(
+        lambda r: -r["Amount"] if r["Section"] in TOOL5_INCOME_SECTIONS else r["Amount"], axis=1
+    )
+    return df
+
+
 def tool5_build_export_grouped(df):
     """Export 1 — Property-Level P&L data, grouped by Accounting Period +
     Account + Property, summed Amount, with Owner and Property Owner Type
     attached (first value seen per Property)."""
-    filtered = tool5_apply_corporate_filter(df)
+    filtered = tool5_apply_pnl_sign(tool5_apply_corporate_filter(df))
     owner_lookup = filtered.groupby("Property")["Owner"].first()
     owner_type_lookup = filtered.groupby("Property")["Property Owner Type"].first()
 
@@ -611,7 +622,7 @@ def tool5_build_export_grouped(df):
 def tool5_build_export_detail(df):
     """Export 2 — same Corporate-exclusion filter as Export 1, but one row per
     raw transaction (no grouping), with full GL detail retained."""
-    filtered = tool5_apply_corporate_filter(df)
+    filtered = tool5_apply_pnl_sign(tool5_apply_corporate_filter(df))
     columns = (
         ["Accounting Period", "Date", "Type", "Num", "Account", "Section", "Class", "Department",
          "Property", "Owner", "Property Owner Type", "Name", "Source Name", "Item", "Item Description",
@@ -3000,20 +3011,25 @@ elif st.session_state.tool == "tool5":
         col2.metric("Distinct Properties", n_properties)
         col3.metric("Corporate (Unattributed) Rows", f"{n_corporate_rows:,}")
 
-        st.dataframe(final_df, use_container_width=True)
+        TOOL5_PREVIEW_ROWS = 200
+        st.caption(f"Showing the first {TOOL5_PREVIEW_ROWS} of {len(final_df):,} rows — download the CSVs below for the full data.")
+        st.dataframe(final_df.head(TOOL5_PREVIEW_ROWS), use_container_width=True)
 
         st.divider()
 
         portfolio_net_income = tool5_portfolio_net_income(st.session_state.tool5_portfolio_raw_list)
+        # Net Income is computed once from the pre-sign-flip filtered data (same
+        # -sum(raw Amount) identity used everywhere else) — both exports share
+        # this same figure regardless of grouping, since it's the same filtered rows.
+        combined_net_income = -tool5_apply_corporate_filter(final_df)["Amount"].sum()
 
-        def _show_export_net_income(export_df):
-            export_net_income = -export_df["Amount"].sum()
-            diff = portfolio_net_income - export_net_income
+        def _show_export_net_income():
+            diff = portfolio_net_income - combined_net_income
             if abs(diff) < TOOL5_TOLERANCE:
-                st.success(f"Net Income from this export: {export_net_income:,.2f} — matches the Portfolio P&L.")
+                st.success(f"Net Income from this export: {combined_net_income:,.2f} — matches the Portfolio P&L.")
             else:
                 st.error(
-                    f"Net Income from this export: {export_net_income:,.2f} — does NOT match the Portfolio "
+                    f"Net Income from this export: {combined_net_income:,.2f} — does NOT match the Portfolio "
                     f"P&L ({portfolio_net_income:,.2f}), difference: {diff:,.2f}."
                 )
 
@@ -3022,11 +3038,13 @@ elif st.session_state.tool == "tool5":
             "Grouped by Accounting Period + Account + Property, summed Amount. Corporate transactions are "
             "excluded, except for accounts below Net Ordinary Income (Other Income / Other Expense) — and "
             "even there, the two OH-split accounts are still excluded since their Corporate rows are just "
-            "the offsetting reclass entry, not real unattributed money."
+            "the offsetting reclass entry, not real unattributed money. Amount's sign is flipped for "
+            "Income/Other Income accounts so revenue displays as positive, matching the P&L reports."
         )
         export1_df = tool5_build_export_grouped(final_df)
-        _show_export_net_income(export1_df)
-        st.dataframe(export1_df, use_container_width=True)
+        _show_export_net_income()
+        st.caption(f"Showing the first {TOOL5_PREVIEW_ROWS} of {len(export1_df):,} rows — download the CSV below for the full data.")
+        st.dataframe(export1_df.head(TOOL5_PREVIEW_ROWS), use_container_width=True)
         export1_csv = tool5_to_export_csv(
             export1_df, text_columns=["Property", "Owner", "Property Owner Type"]
         )
@@ -3044,12 +3062,13 @@ elif st.session_state.tool == "tool5":
 
         st.subheader("Export 2 — Transaction Detail (Ungrouped)")
         st.caption(
-            "Same Corporate-exclusion filter as Export 1, but one row per raw GL transaction, with full "
-            "transaction detail retained (Date, Type, Memo, Name, etc.)."
+            "Same Corporate-exclusion filter and sign convention as Export 1, but one row per raw GL "
+            "transaction, with full transaction detail retained (Date, Type, Memo, Name, etc.)."
         )
         export2_df = tool5_build_export_detail(final_df)
-        _show_export_net_income(export2_df)
-        st.dataframe(export2_df, use_container_width=True)
+        _show_export_net_income()
+        st.caption(f"Showing the first {TOOL5_PREVIEW_ROWS} of {len(export2_df):,} rows — download the CSV below for the full data.")
+        st.dataframe(export2_df.head(TOOL5_PREVIEW_ROWS), use_container_width=True)
         export2_csv = tool5_to_export_csv(
             export2_df, text_columns=["Property", "Owner", "Property Owner Type"]
         )
