@@ -652,28 +652,26 @@ def tool5_apply_property_merges(df, merges):
     return df
 
 
-def tool5_portfolio_net_income(portfolio_raw):
-    """The Portfolio P&L's own stated Net Income (bottom-line row, TOTAL column)."""
-    net_income_rows = portfolio_raw.index[portfolio_raw[0] == "Net Income"]
-    if len(net_income_rows) == 0:
-        raise ValueError("Portfolio P&L: could not find a 'Net Income' row.")
-    total_col = portfolio_raw.shape[1] - 1
-    val = portfolio_raw.iloc[net_income_rows[0], total_col]
-    return val if pd.notna(val) else 0.0
+def tool5_portfolio_net_income(portfolio_raw_list):
+    """The combined Portfolio P&L Net Income (bottom-line row, TOTAL column),
+    summed across every uploaded period's Portfolio P&L file."""
+    total = 0.0
+    for portfolio_raw in portfolio_raw_list:
+        net_income_rows = portfolio_raw.index[portfolio_raw[0] == "Net Income"]
+        if len(net_income_rows) == 0:
+            raise ValueError("Portfolio P&L: could not find a 'Net Income' row.")
+        total_col = portfolio_raw.shape[1] - 1
+        val = portfolio_raw.iloc[net_income_rows[0], total_col]
+        total += val if pd.notna(val) else 0.0
+    return total
 
 
-def tool5_official_property_net_income(property_raw, merges):
+def tool5_official_property_net_income(property_raw_list, merges):
     """Extract each property's official Net Income from the Property-level P&L
     (the report's own bottom-line row), keyed by the same normalized property
     name used elsewhere, with the same merges applied so combined properties'
-    official Net Income is summed together for a fair comparison."""
-    name_row = property_raw.iloc[0]
-    net_income_rows = property_raw.index[property_raw[0] == "Net Income"]
-    if len(net_income_rows) == 0:
-        raise ValueError("Property-Level P&L: could not find a 'Net Income' row.")
-    net_income_row = property_raw.iloc[net_income_rows[0]]
-    n_cols = property_raw.shape[1]
-
+    official Net Income is summed together for a fair comparison. Summed across
+    every uploaded period's Property-level P&L file."""
     rename_map = {}
     for group in merges:
         canonical = group["canonical"]
@@ -682,25 +680,34 @@ def tool5_official_property_net_income(property_raw, merges):
                 rename_map[variant] = canonical
 
     official = {}
-    for c in range(6, n_cols - 1):
-        name = name_row.iloc[c]
-        if pd.notna(name):
-            clean_name = normalize_property_name(str(name).strip())
-            clean_name = rename_map.get(clean_name, clean_name)
-            val = net_income_row.iloc[c]
-            official[clean_name] = official.get(clean_name, 0.0) + (val if pd.notna(val) else 0.0)
+    for property_raw in property_raw_list:
+        name_row = property_raw.iloc[0]
+        net_income_rows = property_raw.index[property_raw[0] == "Net Income"]
+        if len(net_income_rows) == 0:
+            raise ValueError("Property-Level P&L: could not find a 'Net Income' row.")
+        net_income_row = property_raw.iloc[net_income_rows[0]]
+        n_cols = property_raw.shape[1]
+
+        for c in range(6, n_cols - 1):
+            name = name_row.iloc[c]
+            if pd.notna(name):
+                clean_name = normalize_property_name(str(name).strip())
+                clean_name = rename_map.get(clean_name, clean_name)
+                val = net_income_row.iloc[c]
+                official[clean_name] = official.get(clean_name, 0.0) + (val if pd.notna(val) else 0.0)
     return official
 
 
-def tool5_build_net_income_check(unit_econ_df, property_raw, merges):
+def tool5_build_net_income_check(unit_econ_df, property_raw_list, merges):
     """Per-property 'final reconciliation': compare each property's Net Income
-    derived from the (merged, Corporate-filtered) extracted GL data against the
-    Property-level P&L's own Net Income for that property."""
+    derived from the (merged, Corporate-filtered) extracted GL data — combined
+    across all uploaded periods — against the Property-level P&L's own Net
+    Income for that property."""
     merged_df = tool5_apply_property_merges(unit_econ_df, merges)
     filtered = tool5_apply_corporate_filter(merged_df)
     gl_net_income = -filtered.groupby("Property")["Amount"].sum()
 
-    official = tool5_official_property_net_income(property_raw, merges)
+    official = tool5_official_property_net_income(property_raw_list, merges)
 
     all_props = sorted(set(official) | set(gl_net_income.index) - {"Corporate"})
     rows = []
@@ -782,12 +789,12 @@ if "tool5_recon_df" not in st.session_state:
     st.session_state.tool5_recon_df = pd.DataFrame()
 if "tool5_extra_gl_df" not in st.session_state:
     st.session_state.tool5_extra_gl_df = pd.DataFrame()
-if "tool5_portfolio_raw" not in st.session_state:
-    st.session_state.tool5_portfolio_raw = None
-if "tool5_property_raw" not in st.session_state:
-    st.session_state.tool5_property_raw = None
-if "tool5_gl_raw" not in st.session_state:
-    st.session_state.tool5_gl_raw = None
+if "tool5_portfolio_raw_list" not in st.session_state:
+    st.session_state.tool5_portfolio_raw_list = []
+if "tool5_property_raw_list" not in st.session_state:
+    st.session_state.tool5_property_raw_list = []
+if "tool5_gl_raw_list" not in st.session_state:
+    st.session_state.tool5_gl_raw_list = []
 if "tool5_unit_econ_raw_df" not in st.session_state:
     st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
 if "tool5_dept_remap" not in st.session_state:
@@ -834,9 +841,9 @@ def go_home():
     st.session_state.tool5_step = "upload"
     st.session_state.tool5_recon_df = pd.DataFrame()
     st.session_state.tool5_extra_gl_df = pd.DataFrame()
-    st.session_state.tool5_portfolio_raw = None
-    st.session_state.tool5_property_raw = None
-    st.session_state.tool5_gl_raw = None
+    st.session_state.tool5_portfolio_raw_list = []
+    st.session_state.tool5_property_raw_list = []
+    st.session_state.tool5_gl_raw_list = []
     st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
     st.session_state.tool5_dept_remap = None
     st.session_state.tool5_unit_econ_df = pd.DataFrame()
@@ -2630,34 +2637,74 @@ elif st.session_state.tool == "tool5":
 
         st.subheader("Step 1 — 3-Way Reconciliation")
         st.caption(
-            "Upload the Portfolio-level P&L, Property-level P&L, and GL transaction detail for the same "
-            "accounting period. Every account on the Portfolio P&L is checked against the Property-level "
-            "P&L and the GL to confirm all three tie out."
+            "Upload the Portfolio-level P&L, Property-level P&L, and GL transaction detail for each period "
+            "(e.g. one period per year, up to 3). Period 1 is required; Periods 2 and 3 are optional. Each "
+            "period's 3 files are reconciled against each other independently, then combined for the unit "
+            "economics extraction and export."
         )
 
-        portfolio_file = st.file_uploader("Portfolio-Level P&L (Excel)", type=["xlsx", "xls"], key="tool5_portfolio_uploader")
-        property_file = st.file_uploader("Property-Level P&L (Excel)", type=["xlsx", "xls"], key="tool5_property_uploader")
-        gl_file = st.file_uploader("GL Transaction Detail (Excel)", type=["xlsx", "xls"], key="tool5_gl_uploader")
+        period_uploads = []
+        for i in range(1, 4):
+            label = "required" if i == 1 else "optional"
+            st.write(f"**Period {i}** ({label})")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                portfolio_file = st.file_uploader("Portfolio-Level P&L (Excel)", type=["xlsx", "xls"], key=f"tool5_portfolio_uploader_{i}")
+            with col2:
+                property_file = st.file_uploader("Property-Level P&L (Excel)", type=["xlsx", "xls"], key=f"tool5_property_uploader_{i}")
+            with col3:
+                gl_file = st.file_uploader("GL Transaction Detail (Excel)", type=["xlsx", "xls"], key=f"tool5_gl_uploader_{i}")
+            period_uploads.append((portfolio_file, property_file, gl_file))
+            st.divider()
 
-        if portfolio_file is not None and property_file is not None and gl_file is not None:
+        validation_errors = []
+        populated_periods = []
+        for i, (portfolio_file, property_file, gl_file) in enumerate(period_uploads, start=1):
+            n_present = sum(f is not None for f in (portfolio_file, property_file, gl_file))
+            if n_present == 0:
+                continue
+            if n_present < 3:
+                validation_errors.append(f"Period {i} has only {n_present} of 3 files uploaded — upload all 3, or none, for this period.")
+            else:
+                populated_periods.append((i, portfolio_file, property_file, gl_file))
+
+        for msg in validation_errors:
+            st.warning(msg)
+
+        period1_ready = period_uploads[0][0] is not None and period_uploads[0][1] is not None and period_uploads[0][2] is not None
+
+        if period1_ready and not validation_errors:
             if st.button("Run Reconciliation", type="primary", use_container_width=True):
-                recon_df = None
-                extra_gl_df = None
+                portfolio_raw_list, property_raw_list, gl_raw_list = [], [], []
+                recon_dfs, extra_gl_dfs = [], []
+                had_error = False
                 with st.spinner("Reconciling..."):
-                    try:
-                        portfolio_raw = pd.read_excel(portfolio_file, header=None)
-                        property_raw = pd.read_excel(property_file, header=None)
-                        gl_raw = pd.read_excel(gl_file, header=0)
-                        recon_df, extra_gl_df = tool5_reconcile(portfolio_raw, property_raw, gl_raw)
-                    except ValueError as e:
-                        st.error(f"Error: {e}")
+                    for period_num, portfolio_file, property_file, gl_file in populated_periods:
+                        try:
+                            portfolio_raw = pd.read_excel(portfolio_file, header=None)
+                            property_raw = pd.read_excel(property_file, header=None)
+                            gl_raw = pd.read_excel(gl_file, header=0)
+                            recon_df, extra_gl_df = tool5_reconcile(portfolio_raw, property_raw, gl_raw)
+                        except ValueError as e:
+                            st.error(f"Period {period_num} error: {e}")
+                            had_error = True
+                            break
+                        recon_df = recon_df.copy()
+                        recon_df.insert(0, "Period", f"Period {period_num}")
+                        extra_gl_df = extra_gl_df.copy()
+                        extra_gl_df.insert(0, "Period", f"Period {period_num}")
+                        portfolio_raw_list.append(portfolio_raw)
+                        property_raw_list.append(property_raw)
+                        gl_raw_list.append(gl_raw)
+                        recon_dfs.append(recon_df)
+                        extra_gl_dfs.append(extra_gl_df)
 
-                if recon_df is not None:
-                    st.session_state.tool5_recon_df = recon_df
-                    st.session_state.tool5_extra_gl_df = extra_gl_df
-                    st.session_state.tool5_portfolio_raw = portfolio_raw
-                    st.session_state.tool5_property_raw = property_raw
-                    st.session_state.tool5_gl_raw = gl_raw
+                if not had_error:
+                    st.session_state.tool5_recon_df = pd.concat(recon_dfs, ignore_index=True)
+                    st.session_state.tool5_extra_gl_df = pd.concat(extra_gl_dfs, ignore_index=True)
+                    st.session_state.tool5_portfolio_raw_list = portfolio_raw_list
+                    st.session_state.tool5_property_raw_list = property_raw_list
+                    st.session_state.tool5_gl_raw_list = gl_raw_list
                     st.session_state.tool5_step = "reconcile"
                     st.rerun()
 
@@ -2720,9 +2767,9 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_step = "upload"
                 st.session_state.tool5_recon_df = pd.DataFrame()
                 st.session_state.tool5_extra_gl_df = pd.DataFrame()
-                st.session_state.tool5_portfolio_raw = None
-                st.session_state.tool5_property_raw = None
-                st.session_state.tool5_gl_raw = None
+                st.session_state.tool5_portfolio_raw_list = []
+                st.session_state.tool5_property_raw_list = []
+                st.session_state.tool5_gl_raw_list = []
                 st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
                 st.session_state.tool5_dept_remap = None
                 st.session_state.tool5_unit_econ_df = pd.DataFrame()
@@ -2732,12 +2779,17 @@ elif st.session_state.tool == "tool5":
         with col3:
             if st.button("Continue to Unit Economics Prep →", type="primary", use_container_width=True, key="tool5_to_prep"):
                 with st.spinner("Extracting Owner/Property/Department from the GL..."):
-                    expanded_accounts, account_section = tool5_build_account_universe(
-                        st.session_state.tool5_portfolio_raw, st.session_state.tool5_property_raw
-                    )
-                    unit_econ_raw = tool5_extract_unit_economics(
-                        st.session_state.tool5_gl_raw, expanded_accounts, account_section
-                    )
+                    unit_econ_pieces = []
+                    for portfolio_raw, property_raw, gl_raw in zip(
+                        st.session_state.tool5_portfolio_raw_list,
+                        st.session_state.tool5_property_raw_list,
+                        st.session_state.tool5_gl_raw_list,
+                    ):
+                        expanded_accounts, account_section = tool5_build_account_universe(portfolio_raw, property_raw)
+                        unit_econ_pieces.append(
+                            tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section)
+                        )
+                    unit_econ_raw = pd.concat(unit_econ_pieces, ignore_index=True)
                 st.session_state.tool5_unit_econ_raw_df = unit_econ_raw
                 st.session_state.tool5_dept_remap = None
                 st.session_state.tool5_step = "prep_department"
@@ -2883,7 +2935,7 @@ elif st.session_state.tool == "tool5":
 
         check_df = tool5_build_net_income_check(
             st.session_state.tool5_unit_econ_df,
-            st.session_state.tool5_property_raw,
+            st.session_state.tool5_property_raw_list,
             st.session_state.tool5_property_merges,
         )
         st.session_state.tool5_net_income_check_df = check_df
@@ -2952,7 +3004,7 @@ elif st.session_state.tool == "tool5":
 
         st.divider()
 
-        portfolio_net_income = tool5_portfolio_net_income(st.session_state.tool5_portfolio_raw)
+        portfolio_net_income = tool5_portfolio_net_income(st.session_state.tool5_portfolio_raw_list)
 
         def _show_export_net_income(export_df):
             export_net_income = -export_df["Amount"].sum()
@@ -3023,9 +3075,9 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_step = "upload"
                 st.session_state.tool5_recon_df = pd.DataFrame()
                 st.session_state.tool5_extra_gl_df = pd.DataFrame()
-                st.session_state.tool5_portfolio_raw = None
-                st.session_state.tool5_property_raw = None
-                st.session_state.tool5_gl_raw = None
+                st.session_state.tool5_portfolio_raw_list = []
+                st.session_state.tool5_property_raw_list = []
+                st.session_state.tool5_gl_raw_list = []
                 st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
                 st.session_state.tool5_dept_remap = None
                 st.session_state.tool5_unit_econ_df = pd.DataFrame()
