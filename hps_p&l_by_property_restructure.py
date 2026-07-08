@@ -839,6 +839,8 @@ if "tool5_unit_econ_df" not in st.session_state:
     st.session_state.tool5_unit_econ_df = pd.DataFrame()
 if "tool5_property_merges" not in st.session_state:
     st.session_state.tool5_property_merges = []
+if "tool5_typo_overrides" not in st.session_state:
+    st.session_state.tool5_typo_overrides = {}
 if "tool5_net_income_check_df" not in st.session_state:
     st.session_state.tool5_net_income_check_df = pd.DataFrame()
 
@@ -884,6 +886,7 @@ def go_home():
     st.session_state.tool5_dept_remap = None
     st.session_state.tool5_unit_econ_df = pd.DataFrame()
     st.session_state.tool5_property_merges = []
+    st.session_state.tool5_typo_overrides = {}
     st.session_state.tool5_net_income_check_df = pd.DataFrame()
 
 
@@ -2810,6 +2813,7 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_dept_remap = None
                 st.session_state.tool5_unit_econ_df = pd.DataFrame()
                 st.session_state.tool5_property_merges = []
+                st.session_state.tool5_typo_overrides = {}
                 st.session_state.tool5_net_income_check_df = pd.DataFrame()
                 st.rerun()
         with col3:
@@ -2956,6 +2960,89 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_unit_econ_df = tool5_apply_property_merges(
                     unit_econ_df, st.session_state.tool5_property_merges
                 )
+                st.session_state.tool5_step = "typo_fix"
+                st.rerun()
+
+    # ── STEP: FIX PROPERTY/OWNER TYPOS ────────────────────────────────────────
+
+    elif st.session_state.tool5_step == "typo_fix":
+
+        st.subheader("Step 4 — Fix Property/Owner Typos")
+        st.caption(
+            "Search for a property and correct spelling in its Property name and/or Owner. Each correction "
+            "applies to every transaction for that property, across all uploaded periods."
+        )
+
+        unit_econ_df = st.session_state.tool5_unit_econ_df
+        all_properties = sorted(unit_econ_df["Property"].unique().tolist())
+
+        if st.session_state.tool5_typo_overrides:
+            st.write("**Current corrections:**")
+            for prop, vals in list(st.session_state.tool5_typo_overrides.items()):
+                col1, col2 = st.columns([6, 1])
+                with col1:
+                    parts = []
+                    if "Property" in vals:
+                        parts.append(f"Property → **{vals['Property']}**")
+                    if "Owner" in vals:
+                        parts.append(f"Owner → **{vals['Owner']}**")
+                    st.write(f"`{prop}`: " + ", ".join(parts))
+                with col2:
+                    if st.button("Remove", key=f"tool5_typo_remove_{prop}"):
+                        del st.session_state.tool5_typo_overrides[prop]
+                        st.rerun()
+            st.divider()
+
+        st.write("**Search for a property to correct:**")
+        selected_property = st.selectbox("Property", options=all_properties, key="tool5_typo_search")
+
+        if selected_property:
+            current_owner_series = unit_econ_df.loc[unit_econ_df["Property"] == selected_property, "Owner"]
+            current_owner = current_owner_series.iloc[0] if len(current_owner_series) else ""
+            pending = st.session_state.tool5_typo_overrides.get(selected_property, {})
+
+            col1, col2 = st.columns(2)
+            with col1:
+                new_property = st.text_input(
+                    "Corrected Property name",
+                    value=pending.get("Property", selected_property),
+                    key=f"tool5_typo_property_input_{selected_property}",
+                )
+            with col2:
+                new_owner = st.text_input(
+                    "Corrected Owner name",
+                    value=pending.get("Owner", current_owner),
+                    key=f"tool5_typo_owner_input_{selected_property}",
+                )
+
+            if st.button("Save Correction", type="primary", key="tool5_typo_save"):
+                entry = {}
+                if new_property.strip() and new_property.strip() != selected_property:
+                    entry["Property"] = new_property.strip()
+                if new_owner.strip() and new_owner.strip() != current_owner:
+                    entry["Owner"] = new_owner.strip()
+                if entry:
+                    st.session_state.tool5_typo_overrides[selected_property] = entry
+                else:
+                    st.session_state.tool5_typo_overrides.pop(selected_property, None)
+                st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Merge Properties", use_container_width=True, key="tool5_typo_back"):
+                st.session_state.tool5_step = "merge_properties"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool5_typo_apply"):
+                df = st.session_state.tool5_unit_econ_df.copy()
+                for prop, vals in st.session_state.tool5_typo_overrides.items():
+                    mask = df["Property"] == prop
+                    if "Property" in vals:
+                        df.loc[mask, "Property"] = vals["Property"]
+                    if "Owner" in vals:
+                        df.loc[mask, "Owner"] = vals["Owner"]
+                st.session_state.tool5_unit_econ_df = df
                 st.session_state.tool5_step = "net_income_check"
                 st.rerun()
 
@@ -2963,7 +3050,7 @@ elif st.session_state.tool == "tool5":
 
     elif st.session_state.tool5_step == "net_income_check":
 
-        st.subheader("Step 4 — Final Reconciliation: Per-Property Net Income")
+        st.subheader("Step 5 — Final Reconciliation: Per-Property Net Income")
         st.caption(
             "For each property, Net Income derived from the extracted (merged, Corporate-filtered) GL data "
             "is compared against the Net Income shown for that property on the Property-Level P&L."
@@ -3004,8 +3091,8 @@ elif st.session_state.tool == "tool5":
         st.divider()
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("← Back to Merge Properties", use_container_width=True, key="tool5_netcheck_back"):
-                st.session_state.tool5_step = "merge_properties"
+            if st.button("← Back to Fix Typos", use_container_width=True, key="tool5_netcheck_back"):
+                st.session_state.tool5_step = "typo_fix"
                 st.rerun()
         with col2:
             if st.button("Continue to Export →", type="primary", use_container_width=True, key="tool5_netcheck_continue"):
