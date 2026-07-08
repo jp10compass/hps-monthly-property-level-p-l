@@ -494,8 +494,17 @@ def tool5_build_account_universe(portfolio_raw, property_raw):
     for account, section in zip(property_df["Account"], property_df["Section"]):
         account_section.setdefault(account, section)
 
+    # Some accounts (e.g. "Trip Insurance") appear under more than one section
+    # (both Income and Expense) — a flat Account->Section dict can only keep
+    # one, silently dropping the other. Track the full set of sections per
+    # account so extraction can split these into distinct account labels.
+    dup_account_sections = {}
+    for account, section in zip(portfolio_df["Account"], portfolio_df["Section"]):
+        dup_account_sections.setdefault(account, set()).add(section)
+    dup_account_sections = {a: s for a, s in dup_account_sections.items() if len(s) > 1}
+
     expanded_accounts = set(portfolio_df["Account"]) | set(property_df["Account"])
-    return expanded_accounts, account_section
+    return expanded_accounts, account_section, dup_account_sections
 
 
 def tool5_split_owner_property(name):
@@ -532,7 +541,7 @@ def tool5_default_department(department):
 TOOL5_RAW_GL_PASSTHROUGH_COLS = ["Date", "Type", "Num", "Class", "Name", "Source Name", "Item", "Item Description", "Split", "Memo"]
 
 
-def tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section):
+def tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section, dup_account_sections):
     """Extract Owner/Property/Department per relevant GL transaction (Class =
     SICB Management, Account in the expanded P&L universe). Owner/Property come
     from splitting Name on the first ':' ("Owner -C:Property"); Names with no
@@ -550,6 +559,10 @@ def tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section):
         & gl["Account"].isin(expanded_accounts)
     ].copy()
 
+    for col in TOOL5_RAW_GL_PASSTHROUGH_COLS:
+        if col not in gl_real.columns:
+            gl_real[col] = pd.NA
+
     split_result = gl_real["Name"].apply(tool5_split_owner_property)
     gl_real["Owner"] = split_result.apply(lambda t: tool5_clean_owner(t[0]))
     gl_real["Property"] = split_result.apply(lambda t: t[1] if t[1] == "Corporate" else normalize_property_name(t[1]))
@@ -557,14 +570,26 @@ def tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section):
     gl_real["Section"] = gl_real["Account"].map(account_section)
     gl_real["Accounting Period"] = (pd.to_datetime(gl_real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
 
+    # Accounts that appear under more than one P&L section (e.g. "Trip
+    # Insurance" is both Income and Expense) get disambiguated per-transaction
+    # using the GL's own Item column, and split into distinct account labels
+    # ("Trip Insurance Income" / "Trip Insurance Expenses") so each section's
+    # activity is unambiguous in the output rather than colliding under one
+    # shared account name.
+    for account, sections in dup_account_sections.items():
+        income_section = next((s for s in sections if s in TOOL5_INCOME_SECTIONS), None)
+        other_section = next((s for s in sections if s not in TOOL5_INCOME_SECTIONS), None)
+        mask = gl_real["Account"] == account
+        item_prefix = gl_real.loc[mask, "Item"].astype(str).str.split(":").str[0]
+        is_income = item_prefix == "Income"
+        gl_real.loc[mask, "Section"] = is_income.map({True: income_section, False: other_section})
+        gl_real.loc[mask, "Account"] = is_income.map({True: f"{account} Income", False: f"{account} Expenses"})
+
     if "Department" not in gl_real.columns:
         gl_real["Department"] = pd.NA
     gl_real["Department (Raw)"] = gl_real["Department"]
     gl_real["Department"] = gl_real["Department"].apply(tool5_default_department)
 
-    for col in TOOL5_RAW_GL_PASSTHROUGH_COLS:
-        if col not in gl_real.columns:
-            gl_real[col] = pd.NA
     # "Num" mixes real numbers (check #) and text (e.g. "Zelle") in the raw GL,
     # which breaks Streamlit's Arrow-based table display if left as-is.
     gl_real["Num"] = gl_real["Num"].apply(lambda v: "" if pd.isna(v) else str(v))
@@ -2796,9 +2821,9 @@ elif st.session_state.tool == "tool5":
                         st.session_state.tool5_property_raw_list,
                         st.session_state.tool5_gl_raw_list,
                     ):
-                        expanded_accounts, account_section = tool5_build_account_universe(portfolio_raw, property_raw)
+                        expanded_accounts, account_section, dup_account_sections = tool5_build_account_universe(portfolio_raw, property_raw)
                         unit_econ_pieces.append(
-                            tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section)
+                            tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section, dup_account_sections)
                         )
                     unit_econ_raw = pd.concat(unit_econ_pieces, ignore_index=True)
                 st.session_state.tool5_unit_econ_raw_df = unit_econ_raw
