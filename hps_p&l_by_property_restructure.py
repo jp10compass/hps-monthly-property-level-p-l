@@ -301,6 +301,339 @@ TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS = [
 ]
 
 
+### ── TOOL 5 HELPERS ──────────────────────────────────────────────────────────
+
+TOOL5_SECTION_LABELS = {"Income", "Cost of Goods Sold", "Expense", "Other Income", "Other Expense"}
+TOOL5_INCOME_SECTIONS = {"Income", "Other Income"}
+TOOL5_ROLLUP_ACCOUNTS = ROLLUP_ACCOUNTS | {"Net Income"}
+TOOL5_TOLERANCE = 0.01
+
+
+def tool5_is_rollup_account(account):
+    if account is None:
+        return True
+    text = str(account).strip()
+    return text == "" or text.lower().startswith("total ") or text in TOOL5_ROLLUP_ACCOUNTS
+
+
+def tool5_find_first_data_col(header_row):
+    for i, val in enumerate(header_row):
+        if pd.notna(val) and str(val).strip():
+            return i
+    raise ValueError("Could not find a data column in the header row.")
+
+
+def tool5_parse_pnl_sections(raw_df, body_start_row, first_data_col, total_col_idx):
+    """Parse a QuickBooks-style P&L export (Portfolio or Property-level) into
+    one row per leaf account, tagged with its top-level section (Income, Cost
+    of Goods Sold, Expense, Other Income, Other Expense) and its value in the
+    trailing TOTAL column."""
+    label_columns = list(range(0, first_data_col))
+    body = raw_df.iloc[body_start_row:]
+    current_section = None
+    records = []
+    for _, row in body.iterrows():
+        account = get_account_label(row, label_columns)
+        if not account:
+            continue
+        if account in TOOL5_SECTION_LABELS:
+            current_section = account
+            continue
+        data_values = row.iloc[first_data_col:total_col_idx + 1]
+        if data_values.notna().sum() == 0:
+            continue
+        if tool5_is_rollup_account(account):
+            continue
+        records.append({"Section": current_section, "Account": account, "Total": row.iloc[total_col_idx]})
+    return pd.DataFrame(records, columns=["Section", "Account", "Total"])
+
+
+def tool5_attach(base_df, source_df, value_col, dup_accounts):
+    """Left-merge value_col from source_df onto base_df, keyed by Account for
+    accounts that are unambiguous, and by (Account, Section) for accounts that
+    appear under more than one section in the Portfolio P&L (e.g. an account
+    used as both an Income and an Expense line)."""
+    nondup_source = source_df[~source_df["Account"].isin(dup_accounts)][["Account", value_col]]
+    dup_source = source_df[source_df["Account"].isin(dup_accounts)][["Account", "Section", value_col]]
+    base_nondup = base_df[~base_df["Account"].isin(dup_accounts)].merge(nondup_source, on="Account", how="left")
+    base_dup = base_df[base_df["Account"].isin(dup_accounts)].merge(dup_source, on=["Account", "Section"], how="left")
+    return pd.concat([base_nondup, base_dup], ignore_index=True)
+
+
+def tool5_reconcile(portfolio_raw, property_raw, gl_raw):
+    """3-way reconcile the Portfolio P&L, Property-level P&L, and GL transaction
+    detail for the same accounting period. Returns (recon_df, extra_gl_df)."""
+
+    # Portfolio P&L: row 0 is the month/TOTAL header, accounts start at row 1.
+    portfolio_header = portfolio_raw.iloc[0]
+    p_first_data_col = tool5_find_first_data_col(portfolio_header)
+    p_total_col = portfolio_raw.shape[1] - 1
+    if str(portfolio_header.iloc[p_total_col]).strip().upper() != "TOTAL":
+        raise ValueError("Portfolio P&L: last column is not labeled TOTAL.")
+    portfolio_df = tool5_parse_pnl_sections(portfolio_raw, 1, p_first_data_col, p_total_col)
+    portfolio_df = portfolio_df.rename(columns={"Total": "Portfolio Total"})
+
+    # Property-level P&L: row 0 is property names, row 1 is owner/TOTAL header,
+    # accounts start at row 2.
+    property_name_header = property_raw.iloc[0]
+    property_owner_header = property_raw.iloc[1]
+    pr_first_data_col = tool5_find_first_data_col(property_name_header)
+    pr_total_col = property_raw.shape[1] - 1
+    if str(property_owner_header.iloc[pr_total_col]).strip().upper() != "TOTAL":
+        raise ValueError("Property-Level P&L: last column is not labeled TOTAL.")
+    property_df = tool5_parse_pnl_sections(property_raw, 2, pr_first_data_col, pr_total_col)
+    property_df = property_df.rename(columns={"Total": "Property-Level Total"})
+
+    # GL transaction detail: header is row 0 already (real column names).
+    gl = gl_raw.copy()
+    gl.columns = gl.columns.astype(str).str.strip()
+    required_gl_cols = {"Type", "Account", "Class", "Amount", "Item"}
+    missing_cols = required_gl_cols - set(gl.columns)
+    if missing_cols:
+        raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
+
+    gl_real = gl[gl["Type"].notna() & gl["Account"].notna() & (gl["Class"] == "SICB Management")].copy()
+    gl_real["Item Prefix"] = gl_real["Item"].astype(str).str.split(":").str[0]
+    gl_real["Section"] = gl_real["Item Prefix"].apply(lambda p: "Income" if p == "Income" else "Expense")
+
+    portfolio_accounts = set(portfolio_df["Account"])
+
+    # GL accounts with no match on the Portfolio P&L are Balance Sheet accounts
+    # by definition (a P&L report can only ever contain Income Statement
+    # accounts), so they're surfaced separately rather than flagged as issues.
+    gl_extra = gl_real[~gl_real["Account"].isin(portfolio_accounts)]
+    gl_extra_grouped = (
+        gl_extra.groupby("Account", as_index=False)["Amount"].sum()
+        .rename(columns={"Amount": "GL Total"})
+    )
+    gl_extra_grouped = gl_extra_grouped.reindex(
+        gl_extra_grouped["GL Total"].abs().sort_values(ascending=False).index
+    ).reset_index(drop=True)
+
+    gl_matched = gl_real[gl_real["Account"].isin(portfolio_accounts)]
+
+    section_counts = portfolio_df.groupby("Account")["Section"].nunique()
+    dup_accounts = set(section_counts[section_counts > 1].index)
+
+    # Unambiguous accounts: sum every matching GL row regardless of the
+    # item-derived section (avoids losing dollars to inconsistent Item tagging).
+    gl_nondup = (
+        gl_matched[~gl_matched["Account"].isin(dup_accounts)]
+        .groupby("Account", as_index=False)["Amount"].sum()
+    )
+    # Ambiguous accounts (same leaf name under more than one section, e.g.
+    # "Trip Insurance" as both Income and Expense): split by the GL Item prefix.
+    gl_dup = (
+        gl_matched[gl_matched["Account"].isin(dup_accounts)]
+        .groupby(["Account", "Section"], as_index=False)["Amount"].sum()
+    )
+
+    recon_nondup = portfolio_df[~portfolio_df["Account"].isin(dup_accounts)].merge(
+        gl_nondup, on="Account", how="left"
+    )
+    recon_dup = portfolio_df[portfolio_df["Account"].isin(dup_accounts)].merge(
+        gl_dup, on=["Account", "Section"], how="left"
+    )
+    recon = pd.concat([recon_nondup, recon_dup], ignore_index=True)
+    recon = recon.rename(columns={"Amount": "GL Total"})
+    recon["GL Total"] = recon["GL Total"].fillna(0.0)
+
+    property_present = set(zip(property_df["Account"], property_df["Section"]))
+    recon = tool5_attach(recon, property_df, "Property-Level Total", dup_accounts)
+    recon["Property-Level Total"] = recon["Property-Level Total"].fillna(0.0)
+    recon["Portfolio Total"] = recon["Portfolio Total"].fillna(0.0)
+
+    recon["GL Total (Adjusted)"] = recon.apply(
+        lambda r: -r["GL Total"] if r["Section"] in TOOL5_INCOME_SECTIONS else r["GL Total"], axis=1
+    )
+
+    def _checker(r):
+        diff_property = r["Portfolio Total"] - r["Property-Level Total"]
+        diff_gl = r["Portfolio Total"] - r["GL Total (Adjusted)"]
+        property_ok = abs(diff_property) < TOOL5_TOLERANCE
+        gl_ok = abs(diff_gl) < TOOL5_TOLERANCE
+        if property_ok and gl_ok:
+            return "Match"
+        parts = []
+        if not property_ok:
+            if (r["Account"], r["Section"]) not in property_present:
+                parts.append("not broken out at property level (expected)")
+            else:
+                parts.append(f"vs Property {diff_property:,.2f}")
+        if not gl_ok:
+            parts.append(f"vs GL {diff_gl:,.2f}")
+        return "Mismatch: " + "; ".join(parts)
+
+    recon["Checker"] = recon.apply(_checker, axis=1)
+    recon = recon[["Section", "Account", "Portfolio Total", "Property-Level Total", "GL Total (Adjusted)", "Checker"]]
+    recon = recon.sort_values(["Section", "Account"]).reset_index(drop=True)
+
+    return recon, gl_extra_grouped
+
+
+TOOL5_OWNED_ENTITIES = {"CBTS LP", "CIF LP", "PBC LP", "KES LP", "CBC LP", "CinCB LP", "SinCB LP"}
+
+
+def tool5_build_account_universe(portfolio_raw, property_raw):
+    """The account universe for unit-economics extraction must include accounts
+    that net to zero at the Portfolio level (pure reallocation accounts, e.g.
+    "Admin OH Expenses Split by Unit") but still carry real per-property detail
+    on the Property-level P&L. Anchoring on Portfolio alone would silently drop
+    those accounts' GL transactions from the extraction."""
+    portfolio_header = portfolio_raw.iloc[0]
+    p_first_data_col = tool5_find_first_data_col(portfolio_header)
+    p_total_col = portfolio_raw.shape[1] - 1
+    portfolio_df = tool5_parse_pnl_sections(portfolio_raw, 1, p_first_data_col, p_total_col)
+
+    property_name_header = property_raw.iloc[0]
+    pr_first_data_col = tool5_find_first_data_col(property_name_header)
+    pr_total_col = property_raw.shape[1] - 1
+    property_df = tool5_parse_pnl_sections(property_raw, 2, pr_first_data_col, pr_total_col)
+
+    account_section = dict(zip(portfolio_df["Account"], portfolio_df["Section"]))
+    for account, section in zip(property_df["Account"], property_df["Section"]):
+        account_section.setdefault(account, section)
+
+    expanded_accounts = set(portfolio_df["Account"]) | set(property_df["Account"])
+    return expanded_accounts, account_section
+
+
+def tool5_split_owner_property(name):
+    text = str(name).strip()
+    if ":" in text:
+        owner, prop = text.split(":", 1)
+        return owner.strip(), prop.strip()
+    return "Corporate", "Corporate"
+
+
+def tool5_clean_owner(owner):
+    if owner == "Corporate":
+        return owner
+    return re.sub(r' -C$', '', owner).strip()
+
+
+def tool5_owner_type(owner):
+    if owner in TOOL5_OWNED_ENTITIES:
+        return "Owned"
+    if owner == "Corporate":
+        return "Corporate"
+    return "Third Party"
+
+
+def tool5_default_department(department):
+    if pd.isna(department):
+        return department
+    text = str(department).strip()
+    if ":" in text:
+        return text.split(":", 1)[1].strip()
+    return text
+
+
+TOOL5_RAW_GL_PASSTHROUGH_COLS = ["Date", "Type", "Num", "Class", "Name", "Source Name", "Item", "Item Description", "Split", "Memo"]
+
+
+def tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section):
+    """Extract Owner/Property/Department per relevant GL transaction (Class =
+    SICB Management, Account in the expanded P&L universe). Owner/Property come
+    from splitting Name on the first ':' ("Owner -C:Property"); Names with no
+    colon (e.g. "SICB - Rent", "SICB - Customer") are unattributed and go to a
+    "Corporate" bucket for both Owner and Property."""
+    gl = gl_raw.copy()
+    gl.columns = gl.columns.astype(str).str.strip()
+    required_cols = {"Type", "Account", "Class", "Name", "Amount", "Date"}
+    missing_cols = required_cols - set(gl.columns)
+    if missing_cols:
+        raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
+
+    gl_real = gl[
+        gl["Type"].notna() & gl["Account"].notna() & (gl["Class"] == "SICB Management")
+        & gl["Account"].isin(expanded_accounts)
+    ].copy()
+
+    split_result = gl_real["Name"].apply(tool5_split_owner_property)
+    gl_real["Owner"] = split_result.apply(lambda t: tool5_clean_owner(t[0]))
+    gl_real["Property"] = split_result.apply(lambda t: t[1] if t[1] == "Corporate" else normalize_property_name(t[1]))
+    gl_real["Property Owner Type"] = gl_real["Owner"].apply(tool5_owner_type)
+    gl_real["Section"] = gl_real["Account"].map(account_section)
+    gl_real["Accounting Period"] = (pd.to_datetime(gl_real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
+
+    if "Department" not in gl_real.columns:
+        gl_real["Department"] = pd.NA
+    gl_real["Department (Raw)"] = gl_real["Department"]
+    gl_real["Department"] = gl_real["Department"].apply(tool5_default_department)
+
+    for col in TOOL5_RAW_GL_PASSTHROUGH_COLS:
+        if col not in gl_real.columns:
+            gl_real[col] = pd.NA
+    # "Num" mixes real numbers (check #) and text (e.g. "Zelle") in the raw GL,
+    # which breaks Streamlit's Arrow-based table display if left as-is.
+    gl_real["Num"] = gl_real["Num"].apply(lambda v: "" if pd.isna(v) else str(v))
+
+    columns = (
+        ["Accounting Period", "Account", "Section", "Department", "Department (Raw)", "Property", "Owner", "Property Owner Type"]
+        + TOOL5_RAW_GL_PASSTHROUGH_COLS
+        + ["Amount"]
+    )
+    return gl_real[columns].reset_index(drop=True)
+
+
+TOOL5_OH_SPLIT_ACCOUNTS = {"Admin OH Expenses Split by Unit", "R&M OH Expenses Split by Unit"}
+TOOL5_BELOW_NET_ORDINARY_SECTIONS = {"Other Income", "Other Expense"}
+
+
+def tool5_apply_corporate_filter(df):
+    """Drop Corporate (unattributed) rows, except for accounts below Net
+    Ordinary Income (Other Income / Other Expense) which have no sensible
+    per-property attribution — but still exclude the OH-split accounts even
+    there, since their Corporate rows are just the offsetting reclass entry
+    for dollars that are already fully captured in the per-property rows."""
+    keep_mask = (df["Property"] != "Corporate") | (
+        df["Section"].isin(TOOL5_BELOW_NET_ORDINARY_SECTIONS) & ~df["Account"].isin(TOOL5_OH_SPLIT_ACCOUNTS)
+    )
+    return df[keep_mask].copy()
+
+
+def tool5_build_export_grouped(df):
+    """Export 1 — Property-Level P&L data, grouped by Accounting Period +
+    Account + Property, summed Amount, with Owner and Property Owner Type
+    attached (first value seen per Property)."""
+    filtered = tool5_apply_corporate_filter(df)
+    owner_lookup = filtered.groupby("Property")["Owner"].first()
+    owner_type_lookup = filtered.groupby("Property")["Property Owner Type"].first()
+
+    grouped = filtered.groupby(["Accounting Period", "Account", "Property"], as_index=False)["Amount"].sum()
+    grouped["Owner"] = grouped["Property"].map(owner_lookup)
+    grouped["Property Owner Type"] = grouped["Property"].map(owner_type_lookup)
+    grouped = grouped[["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"]]
+    return grouped.sort_values(["Accounting Period", "Account", "Property"]).reset_index(drop=True)
+
+
+def tool5_build_export_detail(df):
+    """Export 2 — same Corporate-exclusion filter as Export 1, but one row per
+    raw transaction (no grouping), with full GL detail retained."""
+    filtered = tool5_apply_corporate_filter(df)
+    columns = (
+        ["Accounting Period", "Date", "Type", "Num", "Account", "Section", "Class", "Department",
+         "Property", "Owner", "Property Owner Type", "Name", "Source Name", "Item", "Item Description",
+         "Split", "Memo", "Amount"]
+    )
+    return filtered[columns].sort_values(["Accounting Period", "Account", "Property"]).reset_index(drop=True)
+
+
+def tool5_to_export_csv(df, text_columns):
+    """Format a Tool 5 export dataframe to CSV bytes: Accounting Period as
+    YYYY-MM-DD, Amount as a plain 4-decimal number, and Accounting Period plus
+    the given text columns wrapped Excel-safe as ="..." so they aren't
+    auto-reformatted (e.g. Accounting Period turning into a real Excel date)."""
+    out = df.copy()
+    out["Accounting Period"] = out["Accounting Period"].apply(lambda d: d.strftime("%Y-%m-%d") if pd.notna(d) else "")
+    out["Amount"] = out["Amount"].apply(lambda v: f"{v:.4f}" if pd.notna(v) else "")
+    for col in ["Accounting Period"] + list(text_columns):
+        if col in out.columns:
+            out[col] = '="' + out[col].astype(str).str.replace('"', '""') + '"'
+    return out.to_csv(index=False).encode("utf-8")
+
+
 ### ── SESSION STATE INIT ──────────────────────────────────────────────────────
 
 if "tool" not in st.session_state:
@@ -359,6 +692,24 @@ if "tool4_missing_overrides" not in st.session_state:
     st.session_state.tool4_missing_overrides = {}
 if "tool4_dropped_df" not in st.session_state:
     st.session_state.tool4_dropped_df = pd.DataFrame()
+if "tool5_step" not in st.session_state:
+    st.session_state.tool5_step = "upload"
+if "tool5_recon_df" not in st.session_state:
+    st.session_state.tool5_recon_df = pd.DataFrame()
+if "tool5_extra_gl_df" not in st.session_state:
+    st.session_state.tool5_extra_gl_df = pd.DataFrame()
+if "tool5_portfolio_raw" not in st.session_state:
+    st.session_state.tool5_portfolio_raw = None
+if "tool5_property_raw" not in st.session_state:
+    st.session_state.tool5_property_raw = None
+if "tool5_gl_raw" not in st.session_state:
+    st.session_state.tool5_gl_raw = None
+if "tool5_unit_econ_raw_df" not in st.session_state:
+    st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
+if "tool5_dept_remap" not in st.session_state:
+    st.session_state.tool5_dept_remap = None
+if "tool5_unit_econ_df" not in st.session_state:
+    st.session_state.tool5_unit_econ_df = pd.DataFrame()
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -392,6 +743,15 @@ def go_home():
     st.session_state.tool4_dept_filter_departments = list(TOOL4_DEFAULT_DEPT_FILTER_DEPARTMENTS)
     st.session_state.tool4_missing_overrides = {}
     st.session_state.tool4_dropped_df = pd.DataFrame()
+    st.session_state.tool5_step = "upload"
+    st.session_state.tool5_recon_df = pd.DataFrame()
+    st.session_state.tool5_extra_gl_df = pd.DataFrame()
+    st.session_state.tool5_portfolio_raw = None
+    st.session_state.tool5_property_raw = None
+    st.session_state.tool5_gl_raw = None
+    st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
+    st.session_state.tool5_dept_remap = None
+    st.session_state.tool5_unit_econ_df = pd.DataFrame()
 
 
 if st.session_state.tool is None:
@@ -428,6 +788,13 @@ if st.session_state.tool is None:
             "subtitle": "Expense Allocation",
             "description": "Allocate SICB Management expenses to individual properties based on active unit count per month.",
         },
+        {
+            "key": "open_tool5",
+            "tool": "tool5",
+            "title": "Final Property Level P&L",
+            "subtitle": "3-Way Reconciliation",
+            "description": "Upload the Portfolio P&L, Property-level P&L, and GL transaction detail for a period and confirm every account ties out across all three.",
+        },
     ]
 
     card_style = """
@@ -441,7 +808,7 @@ if st.session_state.tool is None:
 
     row1 = st.columns(3, gap="large")
     row2_cols = st.columns(3, gap="large")
-    row2 = [row2_cols[0]]
+    row2 = [row2_cols[0], row2_cols[1]]
 
     all_slots = row1 + row2
 
@@ -2113,6 +2480,8 @@ elif st.session_state.tool == "tool4":
                 dropped_part["Amount"] = pd.to_numeric(dropped_part["Amount"], errors="coerce")
                 dropped_part["Accounting Period"] = pd.to_datetime(dropped_part["Accounting Period"], errors="coerce") + pd.offsets.MonthEnd(0)
                 dropped_part["Accounting Period"] = dropped_part["Accounting Period"].dt.to_period("M").dt.to_timestamp("M")
+                dropped_part["Property"] = dropped_part["Property"].astype(str).str.replace(r'^="(.*)"$', r'\1', regex=True).str.replace('""', '"')
+                dropped_part["Owner"] = dropped_part["Owner"].astype(str).str.replace(r'^="(.*)"$', r'\1', regex=True).str.replace('""', '"')
                 dropped_part = dropped_part[["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"]]
             else:
                 dropped_part = pd.DataFrame(columns=["Accounting Period", "Account", "Property", "Amount", "Owner", "Property Owner Type"])
@@ -2152,3 +2521,294 @@ elif st.session_state.tool == "tool4":
             st.session_state.tool4_missing_overrides = {}
             st.session_state.tool4_dropped_df = pd.DataFrame()
             st.rerun()
+
+
+### ── TOOL 5: FINAL PROPERTY LEVEL P&L ────────────────────────────────────────
+
+elif st.session_state.tool == "tool5":
+
+    st.title("Final Property Level P&L")
+    if st.button("← Back to Menu", key="back_tool5"):
+        go_home()
+        st.rerun()
+
+    st.divider()
+
+    # ── STEP: UPLOAD ──────────────────────────────────────────────────────────
+
+    if st.session_state.tool5_step == "upload":
+
+        st.subheader("Step 1 — 3-Way Reconciliation")
+        st.caption(
+            "Upload the Portfolio-level P&L, Property-level P&L, and GL transaction detail for the same "
+            "accounting period. Every account on the Portfolio P&L is checked against the Property-level "
+            "P&L and the GL to confirm all three tie out."
+        )
+
+        portfolio_file = st.file_uploader("Portfolio-Level P&L (Excel)", type=["xlsx", "xls"], key="tool5_portfolio_uploader")
+        property_file = st.file_uploader("Property-Level P&L (Excel)", type=["xlsx", "xls"], key="tool5_property_uploader")
+        gl_file = st.file_uploader("GL Transaction Detail (Excel)", type=["xlsx", "xls"], key="tool5_gl_uploader")
+
+        if portfolio_file is not None and property_file is not None and gl_file is not None:
+            if st.button("Run Reconciliation", type="primary", use_container_width=True):
+                recon_df = None
+                extra_gl_df = None
+                with st.spinner("Reconciling..."):
+                    try:
+                        portfolio_raw = pd.read_excel(portfolio_file, header=None)
+                        property_raw = pd.read_excel(property_file, header=None)
+                        gl_raw = pd.read_excel(gl_file, header=0)
+                        recon_df, extra_gl_df = tool5_reconcile(portfolio_raw, property_raw, gl_raw)
+                    except ValueError as e:
+                        st.error(f"Error: {e}")
+
+                if recon_df is not None:
+                    st.session_state.tool5_recon_df = recon_df
+                    st.session_state.tool5_extra_gl_df = extra_gl_df
+                    st.session_state.tool5_portfolio_raw = portfolio_raw
+                    st.session_state.tool5_property_raw = property_raw
+                    st.session_state.tool5_gl_raw = gl_raw
+                    st.session_state.tool5_step = "reconcile"
+                    st.rerun()
+
+    # ── STEP: RECONCILE ───────────────────────────────────────────────────────
+
+    elif st.session_state.tool5_step == "reconcile":
+
+        recon_df = st.session_state.tool5_recon_df
+        extra_gl_df = st.session_state.tool5_extra_gl_df
+
+        n_total = len(recon_df)
+        n_match = int((recon_df["Checker"] == "Match").sum())
+        n_expected = int(recon_df["Checker"].str.contains("expected", na=False).sum())
+        n_real_mismatch = n_total - n_match - n_expected
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Accounts Matched", f"{n_match} / {n_total}")
+        col2.metric("Expected Non-Issues", n_expected)
+        col3.metric("Real Mismatches", n_real_mismatch)
+
+        if n_real_mismatch == 0:
+            st.success("All accounts reconcile (aside from expected, flagged non-issues).")
+        else:
+            st.error(f"{n_real_mismatch} account(s) have a real mismatch — review below.")
+
+        show_only_issues = st.checkbox("Show only mismatches", value=(n_real_mismatch > 0))
+        display_df = recon_df[recon_df["Checker"] != "Match"] if show_only_issues else recon_df
+        st.dataframe(display_df, use_container_width=True)
+
+        csv_data = recon_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download Reconciliation CSV",
+            data=csv_data,
+            file_name="pnl_reconciliation.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        with st.expander(f"Balance Sheet accounts excluded from reconciliation ({len(extra_gl_df)})"):
+            st.caption(
+                "These GL accounts (Class = SICB Management) have activity but don't appear on the Portfolio "
+                "P&L. A Profit & Loss report can only ever contain Income Statement accounts, so these are "
+                "Balance Sheet accounts (bank, credit card, inventory, loans, etc.) and are excluded from the "
+                "reconciliation by design."
+            )
+            st.dataframe(extra_gl_df, use_container_width=True)
+
+        st.divider()
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("← Upload Different Files", use_container_width=True, key="tool5_back_upload"):
+                st.session_state.tool5_step = "upload"
+                st.rerun()
+        with col2:
+            if st.button("Restart", use_container_width=True, key="tool5_restart"):
+                st.session_state.tool5_step = "upload"
+                st.session_state.tool5_recon_df = pd.DataFrame()
+                st.session_state.tool5_extra_gl_df = pd.DataFrame()
+                st.session_state.tool5_portfolio_raw = None
+                st.session_state.tool5_property_raw = None
+                st.session_state.tool5_gl_raw = None
+                st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
+                st.session_state.tool5_dept_remap = None
+                st.session_state.tool5_unit_econ_df = pd.DataFrame()
+                st.rerun()
+        with col3:
+            if st.button("Continue to Unit Economics Prep →", type="primary", use_container_width=True, key="tool5_to_prep"):
+                with st.spinner("Extracting Owner/Property/Department from the GL..."):
+                    expanded_accounts, account_section = tool5_build_account_universe(
+                        st.session_state.tool5_portfolio_raw, st.session_state.tool5_property_raw
+                    )
+                    unit_econ_raw = tool5_extract_unit_economics(
+                        st.session_state.tool5_gl_raw, expanded_accounts, account_section
+                    )
+                st.session_state.tool5_unit_econ_raw_df = unit_econ_raw
+                st.session_state.tool5_dept_remap = None
+                st.session_state.tool5_step = "prep_department"
+                st.rerun()
+
+    # ── STEP: UNIT ECONOMICS — DEPARTMENT CLEANUP ─────────────────────────────
+
+    elif st.session_state.tool5_step == "prep_department":
+
+        st.subheader("Step 2 — Prepare Data for P&L by Property (Unit Economics)")
+        st.caption(
+            "Owner and Property have been extracted from the GL's Name field (\"Owner -C:Property\"). "
+            "Transactions with no colon in Name (e.g. \"SICB - Rent\", \"SICB - Customer\") are unattributed "
+            "and bucketed as Corporate for both Owner and Property."
+        )
+
+        raw_df = st.session_state.tool5_unit_econ_raw_df
+        st.info(f"{len(raw_df):,} relevant transactions extracted (Class = SICB Management, P&L accounts only).")
+
+        st.divider()
+        st.write("**Review Department cleanup**")
+        st.caption(
+            "Each raw Department value found in the data is shown below, pre-filled with what the default "
+            "logic produces (text after the first \":\", or unchanged if there's no colon). Edit any value "
+            "you want to override."
+        )
+
+        raw_departments = sorted(raw_df["Department (Raw)"].dropna().unique().tolist())
+
+        if st.session_state.tool5_dept_remap is None:
+            working_remap = {d: tool5_default_department(d) for d in raw_departments}
+        else:
+            working_remap = dict(st.session_state.tool5_dept_remap)
+            for d in raw_departments:
+                if d not in working_remap:
+                    working_remap[d] = tool5_default_department(d)
+
+        if not raw_departments:
+            st.info("No Department values found in the relevant transactions.")
+        else:
+            for i, dept in enumerate(raw_departments):
+                key = f"tool5_dept_input_{i}"
+                if key not in st.session_state:
+                    st.session_state[key] = working_remap[dept]
+
+            cols = st.columns(2)
+            for i, dept in enumerate(raw_departments):
+                with cols[i % 2]:
+                    st.text_input(f"`{dept}`", key=f"tool5_dept_input_{i}")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Reconciliation", use_container_width=True, key="tool5_dept_back"):
+                st.session_state.tool5_step = "reconcile"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool5_dept_apply"):
+                new_remap = {}
+                for i, dept in enumerate(raw_departments):
+                    new_value = st.session_state.get(f"tool5_dept_input_{i}", dept)
+                    new_remap[dept] = new_value.strip() if new_value.strip() else dept
+                st.session_state.tool5_dept_remap = new_remap
+
+                final_df = raw_df.copy()
+                final_df["Department"] = final_df["Department (Raw)"].map(
+                    lambda d: new_remap.get(d, tool5_default_department(d)) if pd.notna(d) else d
+                )
+                final_df = final_df.drop(columns=["Department (Raw)"])
+                st.session_state.tool5_unit_econ_df = final_df
+                st.session_state.tool5_step = "prep_export"
+                st.rerun()
+
+    # ── STEP: UNIT ECONOMICS — EXPORT ─────────────────────────────────────────
+
+    elif st.session_state.tool5_step == "prep_export":
+
+        final_df = st.session_state.tool5_unit_econ_df
+        raw_df = st.session_state.tool5_unit_econ_raw_df
+
+        raw_sum = raw_df["Amount"].sum(min_count=1)
+        final_sum = final_df["Amount"].sum(min_count=1)
+        if abs(raw_sum - final_sum) < 0.01:
+            st.success(f"Reconciliation passed — Amount totals match: {raw_sum:,.2f}")
+        else:
+            st.error(
+                f"Reconciliation failed — Extracted total: {raw_sum:,.2f} | "
+                f"Final total: {final_sum:,.2f} | Difference: {raw_sum - final_sum:,.2f}"
+            )
+
+        n_properties = final_df.loc[final_df["Property"] != "Corporate", "Property"].nunique()
+        n_corporate_rows = int((final_df["Property"] == "Corporate").sum())
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Rows", f"{len(final_df):,}")
+        col2.metric("Distinct Properties", n_properties)
+        col3.metric("Corporate (Unattributed) Rows", f"{n_corporate_rows:,}")
+
+        st.dataframe(final_df, use_container_width=True)
+
+        st.divider()
+
+        st.subheader("Export 1 — Property-Level P&L (Grouped)")
+        st.caption(
+            "Grouped by Accounting Period + Account + Property, summed Amount. Corporate transactions are "
+            "excluded, except for accounts below Net Ordinary Income (Other Income / Other Expense) — and "
+            "even there, the two OH-split accounts are still excluded since their Corporate rows are just "
+            "the offsetting reclass entry, not real unattributed money."
+        )
+        export1_df = tool5_build_export_grouped(final_df)
+        st.dataframe(export1_df, use_container_width=True)
+        export1_csv = tool5_to_export_csv(
+            export1_df, text_columns=["Property", "Owner", "Property Owner Type"]
+        )
+        st.download_button(
+            label="Download Export 1 — Property-Level P&L CSV",
+            data=export1_csv,
+            file_name="property_level_pnl.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="tool5_download_export1",
+        )
+
+        st.divider()
+
+        st.subheader("Export 2 — Transaction Detail (Ungrouped)")
+        st.caption(
+            "Same Corporate-exclusion filter as Export 1, but one row per raw GL transaction, with full "
+            "transaction detail retained (Date, Type, Memo, Name, etc.)."
+        )
+        export2_df = tool5_build_export_detail(final_df)
+        st.dataframe(export2_df, use_container_width=True)
+        export2_csv = tool5_to_export_csv(
+            export2_df, text_columns=["Property", "Owner", "Property Owner Type"]
+        )
+        st.download_button(
+            label="Download Export 2 — Transaction Detail CSV",
+            data=export2_csv,
+            file_name="unit_economics_detail.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="tool5_download_export2",
+        )
+
+        st.divider()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Department Cleanup", use_container_width=True, key="tool5_export_back"):
+                st.session_state.tool5_step = "prep_department"
+                st.rerun()
+        with col2:
+            if st.button("Restart", use_container_width=True, key="tool5_export_restart"):
+                st.session_state.tool5_step = "upload"
+                st.session_state.tool5_recon_df = pd.DataFrame()
+                st.session_state.tool5_extra_gl_df = pd.DataFrame()
+                st.session_state.tool5_portfolio_raw = None
+                st.session_state.tool5_property_raw = None
+                st.session_state.tool5_gl_raw = None
+                st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
+                st.session_state.tool5_dept_remap = None
+                st.session_state.tool5_unit_econ_df = pd.DataFrame()
+                for k in [k for k in st.session_state if k.startswith("tool5_dept_input_")]:
+                    del st.session_state[k]
+                st.rerun()
