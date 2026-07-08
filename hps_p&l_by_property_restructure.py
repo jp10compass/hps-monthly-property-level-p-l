@@ -634,6 +634,90 @@ def tool5_to_export_csv(df, text_columns):
     return out.to_csv(index=False).encode("utf-8")
 
 
+def tool5_apply_property_merges(df, merges):
+    """Rename Property variants to their canonical name. Unlike Tool 2's
+    apply_property_merges, this does NOT re-group/sum — Tool 5's transaction
+    detail (Export 2) must stay at the raw-transaction grain, so grouping is
+    left to tool5_build_export_grouped at export time."""
+    rename_map = {}
+    for group in merges:
+        canonical = group["canonical"]
+        for variant in group["variants"]:
+            if variant != canonical:
+                rename_map[variant] = canonical
+    if not rename_map:
+        return df
+    df = df.copy()
+    df["Property"] = df["Property"].replace(rename_map)
+    return df
+
+
+def tool5_portfolio_net_income(portfolio_raw):
+    """The Portfolio P&L's own stated Net Income (bottom-line row, TOTAL column)."""
+    net_income_rows = portfolio_raw.index[portfolio_raw[0] == "Net Income"]
+    if len(net_income_rows) == 0:
+        raise ValueError("Portfolio P&L: could not find a 'Net Income' row.")
+    total_col = portfolio_raw.shape[1] - 1
+    val = portfolio_raw.iloc[net_income_rows[0], total_col]
+    return val if pd.notna(val) else 0.0
+
+
+def tool5_official_property_net_income(property_raw, merges):
+    """Extract each property's official Net Income from the Property-level P&L
+    (the report's own bottom-line row), keyed by the same normalized property
+    name used elsewhere, with the same merges applied so combined properties'
+    official Net Income is summed together for a fair comparison."""
+    name_row = property_raw.iloc[0]
+    net_income_rows = property_raw.index[property_raw[0] == "Net Income"]
+    if len(net_income_rows) == 0:
+        raise ValueError("Property-Level P&L: could not find a 'Net Income' row.")
+    net_income_row = property_raw.iloc[net_income_rows[0]]
+    n_cols = property_raw.shape[1]
+
+    rename_map = {}
+    for group in merges:
+        canonical = group["canonical"]
+        for variant in group["variants"]:
+            if variant != canonical:
+                rename_map[variant] = canonical
+
+    official = {}
+    for c in range(6, n_cols - 1):
+        name = name_row.iloc[c]
+        if pd.notna(name):
+            clean_name = normalize_property_name(str(name).strip())
+            clean_name = rename_map.get(clean_name, clean_name)
+            val = net_income_row.iloc[c]
+            official[clean_name] = official.get(clean_name, 0.0) + (val if pd.notna(val) else 0.0)
+    return official
+
+
+def tool5_build_net_income_check(unit_econ_df, property_raw, merges):
+    """Per-property 'final reconciliation': compare each property's Net Income
+    derived from the (merged, Corporate-filtered) extracted GL data against the
+    Property-level P&L's own Net Income for that property."""
+    merged_df = tool5_apply_property_merges(unit_econ_df, merges)
+    filtered = tool5_apply_corporate_filter(merged_df)
+    gl_net_income = -filtered.groupby("Property")["Amount"].sum()
+
+    official = tool5_official_property_net_income(property_raw, merges)
+
+    all_props = sorted(set(official) | set(gl_net_income.index) - {"Corporate"})
+    rows = []
+    for p in all_props:
+        pnl_val = official.get(p, 0.0)
+        gl_val = gl_net_income.get(p, 0.0)
+        diff = pnl_val - gl_val
+        rows.append({
+            "Property": p,
+            "Property P&L Net Income": pnl_val,
+            "GL Net Income": gl_val,
+            "Diff": diff,
+            "Match": abs(diff) < TOOL5_TOLERANCE,
+        })
+    return pd.DataFrame(rows)
+
+
 ### ── SESSION STATE INIT ──────────────────────────────────────────────────────
 
 if "tool" not in st.session_state:
@@ -710,6 +794,10 @@ if "tool5_dept_remap" not in st.session_state:
     st.session_state.tool5_dept_remap = None
 if "tool5_unit_econ_df" not in st.session_state:
     st.session_state.tool5_unit_econ_df = pd.DataFrame()
+if "tool5_property_merges" not in st.session_state:
+    st.session_state.tool5_property_merges = []
+if "tool5_net_income_check_df" not in st.session_state:
+    st.session_state.tool5_net_income_check_df = pd.DataFrame()
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -752,6 +840,8 @@ def go_home():
     st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
     st.session_state.tool5_dept_remap = None
     st.session_state.tool5_unit_econ_df = pd.DataFrame()
+    st.session_state.tool5_property_merges = []
+    st.session_state.tool5_net_income_check_df = pd.DataFrame()
 
 
 if st.session_state.tool is None:
@@ -2636,6 +2726,8 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
                 st.session_state.tool5_dept_remap = None
                 st.session_state.tool5_unit_econ_df = pd.DataFrame()
+                st.session_state.tool5_property_merges = []
+                st.session_state.tool5_net_income_check_df = pd.DataFrame()
                 st.rerun()
         with col3:
             if st.button("Continue to Unit Economics Prep →", type="primary", use_container_width=True, key="tool5_to_prep"):
@@ -2716,6 +2808,119 @@ elif st.session_state.tool == "tool5":
                 )
                 final_df = final_df.drop(columns=["Department (Raw)"])
                 st.session_state.tool5_unit_econ_df = final_df
+                for k in [k for k in st.session_state if k.startswith("tool5_dept_input_")]:
+                    del st.session_state[k]
+                st.session_state.tool5_step = "merge_properties"
+                st.rerun()
+
+    # ── STEP: MERGE PROPERTIES ────────────────────────────────────────────────
+
+    elif st.session_state.tool5_step == "merge_properties":
+
+        st.subheader("Step 3 — Merge Properties")
+        st.caption("Group property names that refer to the same property. Select all variants, then pick which name to keep.")
+
+        unit_econ_df = st.session_state.tool5_unit_econ_df
+        all_properties = sorted(unit_econ_df["Property"].unique().tolist())
+
+        if st.session_state.tool5_property_merges:
+            st.write("**Current merge groups:**")
+            for i, group in enumerate(st.session_state.tool5_property_merges):
+                col1, col2 = st.columns([6, 1])
+                with col1:
+                    variants_str = ", ".join(f"`{v}`" for v in group["variants"] if v != group["canonical"])
+                    st.write(f"{variants_str} → **{group['canonical']}**")
+                with col2:
+                    if st.button("Remove", key=f"tool5_remove_merge_{i}"):
+                        st.session_state.tool5_property_merges.pop(i)
+                        st.rerun()
+            st.divider()
+
+        st.write("**Add a new merge group:**")
+        n = len(st.session_state.tool5_property_merges)
+        selected_variants = st.multiselect(
+            "Select property names to merge",
+            options=all_properties,
+            key=f"tool5_merge_variants_{n}",
+        )
+
+        if len(selected_variants) >= 2:
+            canonical = st.radio(
+                "Which name to keep?",
+                options=selected_variants,
+                key=f"tool5_merge_canonical_{n}",
+            )
+            if st.button("Add Group", type="primary", key="tool5_merge_add_group"):
+                st.session_state.tool5_property_merges.append({
+                    "variants": selected_variants,
+                    "canonical": canonical,
+                })
+                st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Department Cleanup", use_container_width=True, key="tool5_merge_back"):
+                st.session_state.tool5_step = "prep_department"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool5_merge_apply"):
+                st.session_state.tool5_unit_econ_df = tool5_apply_property_merges(
+                    unit_econ_df, st.session_state.tool5_property_merges
+                )
+                st.session_state.tool5_step = "net_income_check"
+                st.rerun()
+
+    # ── STEP: PER-PROPERTY NET INCOME CHECK (FINAL RECONCILIATION) ────────────
+
+    elif st.session_state.tool5_step == "net_income_check":
+
+        st.subheader("Step 4 — Final Reconciliation: Per-Property Net Income")
+        st.caption(
+            "For each property, Net Income derived from the extracted (merged, Corporate-filtered) GL data "
+            "is compared against the Net Income shown for that property on the Property-Level P&L."
+        )
+
+        check_df = tool5_build_net_income_check(
+            st.session_state.tool5_unit_econ_df,
+            st.session_state.tool5_property_raw,
+            st.session_state.tool5_property_merges,
+        )
+        st.session_state.tool5_net_income_check_df = check_df
+
+        n_total = len(check_df)
+        n_match = int(check_df["Match"].sum())
+        col1, col2 = st.columns(2)
+        col1.metric("Properties Matched", f"{n_match} / {n_total}")
+        col2.metric("Mismatches", n_total - n_match)
+
+        if n_match == n_total:
+            st.success("All properties reconcile — Net Income matches the Property-Level P&L for every property.")
+        else:
+            st.error(f"{n_total - n_match} propert(y/ies) do not reconcile — review below.")
+
+        show_only_issues = st.checkbox("Show only mismatches", value=(n_match < n_total))
+        display_df = check_df[~check_df["Match"]] if show_only_issues else check_df
+
+        def _highlight_match(row):
+            color = "background-color: #d4f7d4" if row["Match"] else ""
+            return [color] * len(row)
+
+        st.dataframe(
+            display_df.style.apply(_highlight_match, axis=1).format(
+                {"Property P&L Net Income": "{:,.2f}", "GL Net Income": "{:,.2f}", "Diff": "{:,.2f}"}
+            ),
+            use_container_width=True,
+        )
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Merge Properties", use_container_width=True, key="tool5_netcheck_back"):
+                st.session_state.tool5_step = "merge_properties"
+                st.rerun()
+        with col2:
+            if st.button("Continue to Export →", type="primary", use_container_width=True, key="tool5_netcheck_continue"):
                 st.session_state.tool5_step = "prep_export"
                 st.rerun()
 
@@ -2747,6 +2952,19 @@ elif st.session_state.tool == "tool5":
 
         st.divider()
 
+        portfolio_net_income = tool5_portfolio_net_income(st.session_state.tool5_portfolio_raw)
+
+        def _show_export_net_income(export_df):
+            export_net_income = -export_df["Amount"].sum()
+            diff = portfolio_net_income - export_net_income
+            if abs(diff) < TOOL5_TOLERANCE:
+                st.success(f"Net Income from this export: {export_net_income:,.2f} — matches the Portfolio P&L.")
+            else:
+                st.error(
+                    f"Net Income from this export: {export_net_income:,.2f} — does NOT match the Portfolio "
+                    f"P&L ({portfolio_net_income:,.2f}), difference: {diff:,.2f}."
+                )
+
         st.subheader("Export 1 — Property-Level P&L (Grouped)")
         st.caption(
             "Grouped by Accounting Period + Account + Property, summed Amount. Corporate transactions are "
@@ -2755,6 +2973,7 @@ elif st.session_state.tool == "tool5":
             "the offsetting reclass entry, not real unattributed money."
         )
         export1_df = tool5_build_export_grouped(final_df)
+        _show_export_net_income(export1_df)
         st.dataframe(export1_df, use_container_width=True)
         export1_csv = tool5_to_export_csv(
             export1_df, text_columns=["Property", "Owner", "Property Owner Type"]
@@ -2777,6 +2996,7 @@ elif st.session_state.tool == "tool5":
             "transaction detail retained (Date, Type, Memo, Name, etc.)."
         )
         export2_df = tool5_build_export_detail(final_df)
+        _show_export_net_income(export2_df)
         st.dataframe(export2_df, use_container_width=True)
         export2_csv = tool5_to_export_csv(
             export2_df, text_columns=["Property", "Owner", "Property Owner Type"]
@@ -2795,8 +3015,8 @@ elif st.session_state.tool == "tool5":
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("← Back to Department Cleanup", use_container_width=True, key="tool5_export_back"):
-                st.session_state.tool5_step = "prep_department"
+            if st.button("← Back to Final Reconciliation", use_container_width=True, key="tool5_export_back"):
+                st.session_state.tool5_step = "net_income_check"
                 st.rerun()
         with col2:
             if st.button("Restart", use_container_width=True, key="tool5_export_restart"):
@@ -2809,6 +3029,8 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_unit_econ_raw_df = pd.DataFrame()
                 st.session_state.tool5_dept_remap = None
                 st.session_state.tool5_unit_econ_df = pd.DataFrame()
+                st.session_state.tool5_property_merges = []
+                st.session_state.tool5_net_income_check_df = pd.DataFrame()
                 for k in [k for k in st.session_state if k.startswith("tool5_dept_input_")]:
                     del st.session_state[k]
                 st.rerun()
