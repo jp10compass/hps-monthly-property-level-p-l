@@ -323,11 +323,15 @@ def tool5_find_first_data_col(header_row):
     raise ValueError("Could not find a data column in the header row.")
 
 
-def tool5_parse_pnl_sections(raw_df, body_start_row, first_data_col, total_col_idx):
+def tool5_parse_pnl_sections(raw_df, body_start_row, first_data_col, total_col_idx, include_rollups=False):
     """Parse a QuickBooks-style P&L export (Portfolio or Property-level) into
     one row per leaf account, tagged with its top-level section (Income, Cost
     of Goods Sold, Expense, Other Income, Other Expense) and its value in the
-    trailing TOTAL column."""
+    trailing TOTAL column. By default, subtotal/rollup rows ("Total ...",
+    Gross Profit, Net Ordinary Income, Net Other Income, Net Income) are
+    dropped, since callers doing reconciliation or GL-account matching only
+    want leaf accounts. Pass include_rollups=True to keep those rows too
+    (e.g. for a flat, faithful reproduction of the original report)."""
     label_columns = list(range(0, first_data_col))
     body = raw_df.iloc[body_start_row:]
     current_section = None
@@ -342,10 +346,93 @@ def tool5_parse_pnl_sections(raw_df, body_start_row, first_data_col, total_col_i
         data_values = row.iloc[first_data_col:total_col_idx + 1]
         if data_values.notna().sum() == 0:
             continue
-        if tool5_is_rollup_account(account):
+        if tool5_is_rollup_account(account) and not include_rollups:
             continue
         records.append({"Section": current_section, "Account": account, "Total": row.iloc[total_col_idx]})
     return pd.DataFrame(records, columns=["Section", "Account", "Total"])
+
+
+def tool5_build_consolidated_portfolio_pnl(portfolio_raw_list, period_labels):
+    """Consolidate multiple periods' Portfolio P&L into one flat table: every
+    row from the original report (leaf accounts AND subtotal/rollup rows like
+    "Total Markup" or "Net Income") is kept, aligned across periods by Account
+    name. An account that only exists in some periods still gets its own row,
+    blank for the periods where it's absent. Row order is an ordered merge
+    across periods: the first period sets the initial order, and any account
+    introduced only in a later period is inserted right after the nearest
+    account it follows in that period's own order (rather than appended at
+    the very end), so a brand-new account still lands in its natural section
+    instead of trailing after Net Income."""
+    period_dfs = []
+    for portfolio_raw in portfolio_raw_list:
+        header = portfolio_raw.iloc[0]
+        first_data_col = tool5_find_first_data_col(header)
+        total_col = portfolio_raw.shape[1] - 1
+        period_dfs.append(tool5_parse_pnl_sections(portfolio_raw, 1, first_data_col, total_col, include_rollups=True))
+
+    row_order = []
+    seen = set()
+    section_lookup = {}
+    for period_df in period_dfs:
+        insert_at = 0
+        for account, section in zip(period_df["Account"], period_df["Section"]):
+            if account in seen:
+                insert_at = row_order.index(account) + 1
+            else:
+                seen.add(account)
+                row_order.insert(insert_at, account)
+                section_lookup[account] = "" if tool5_is_rollup_account(account) else section
+                insert_at += 1
+
+    consolidated = pd.DataFrame({
+        "Section": [section_lookup[a] for a in row_order],
+        "Account": row_order,
+        "Is Rollup": [tool5_is_rollup_account(a) for a in row_order],
+    })
+
+    for label, period_df in zip(period_labels, period_dfs):
+        totals = period_df.set_index("Account")["Total"]
+        consolidated[label] = consolidated["Account"].map(totals)
+
+    return consolidated
+
+
+def tool5_export_consolidated_pnl_excel(consolidated_df, period_labels):
+    """Write the consolidated Portfolio P&L to an .xlsx with subtotal/rollup
+    rows (Total ..., Gross Profit, Net Ordinary Income, Net Other Income, Net
+    Income) bolded and top-bordered so they visually stand apart from leaf
+    accounts, the way a printed financial statement would."""
+    import io
+    from openpyxl.styles import Font, Border, Side
+
+    export_df = consolidated_df[["Section", "Account"] + list(period_labels)]
+    n_cols = export_df.shape[1]
+    first_period_col = 3  # 1-indexed: Section=1, Account=2, periods start at 3
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Consolidated P&L")
+        worksheet = writer.sheets["Consolidated P&L"]
+
+        bold_font = Font(bold=True)
+        top_border = Border(top=Side(style="thin"))
+        number_format = "#,##0.00;(#,##0.00)"
+
+        for row_offset, is_rollup in enumerate(consolidated_df["Is Rollup"]):
+            excel_row = row_offset + 2
+            for col in range(first_period_col, n_cols + 1):
+                worksheet.cell(row=excel_row, column=col).number_format = number_format
+            if is_rollup:
+                for col in range(1, n_cols + 1):
+                    cell = worksheet.cell(row=excel_row, column=col)
+                    cell.font = bold_font
+                    cell.border = top_border
+
+        for col_idx, column in enumerate(export_df.columns, start=1):
+            max_len = max([len(str(column))] + [len(str(v)) for v in export_df[column].fillna("")])
+            worksheet.column_dimensions[worksheet.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 40)
+
+    return buffer.getvalue()
 
 
 def tool5_attach(base_df, source_df, value_col, dup_accounts):
@@ -2890,10 +2977,10 @@ elif st.session_state.tool == "tool5":
             {
                 "key": "tool5_path_fin_stmt",
                 "title": "Financial Statement",
-                "subtitle": "Coming soon",
-                "description": "Prepare data for a consolidated financial statement.",
-                "enabled": False,
-                "next_step": None,
+                "subtitle": "Consolidated Portfolio P&L",
+                "description": "Consolidate the uploaded periods' Portfolio P&L into one flat, aligned export, ready for your mapping workbook.",
+                "enabled": True,
+                "next_step": "fin_stmt_export",
             },
             {
                 "key": "tool5_path_corp_dash",
@@ -2925,6 +3012,58 @@ elif st.session_state.tool == "tool5":
         st.divider()
         if st.button("← Back to Reconciliation", key="tool5_choose_path_back"):
             st.session_state.tool5_step = "reconcile"
+            st.rerun()
+
+    # ── STEP: FINANCIAL STATEMENT — CONSOLIDATED PORTFOLIO P&L ───────────────
+
+    elif st.session_state.tool5_step == "fin_stmt_export":
+
+        st.subheader("Consolidated Portfolio P&L")
+        st.caption(
+            "Every row from each uploaded period's Portfolio P&L — leaf accounts and subtotal/rollup rows alike "
+            "(Total ..., Gross Profit, Net Ordinary Income, Net Other Income, Net Income) — aligned into one flat "
+            "table. An account that only appears in some periods still gets its own row, blank for the periods "
+            "where it's absent. This is the raw account-level data, not yet mapped to your Financial Statement "
+            "line categories — bring it into your mapping workbook as the source for VLOOKUP/SUMIFS."
+        )
+
+        portfolio_raw_list = st.session_state.tool5_portfolio_raw_list
+        n_periods = len(portfolio_raw_list)
+
+        st.write("**Label each period** (used as the column header below):")
+        period_cols = st.columns(n_periods)
+        period_labels = []
+        for i, col in enumerate(period_cols, start=1):
+            with col:
+                default_label = f"Period {i}"
+                label = st.text_input(f"Period {i}", value=default_label, key=f"tool5_fin_stmt_label_{i}")
+                period_labels.append(label.strip() if label.strip() else default_label)
+
+        if len(set(period_labels)) != len(period_labels):
+            st.error("Period labels must be unique.")
+        else:
+            consolidated_df = tool5_build_consolidated_portfolio_pnl(portfolio_raw_list, period_labels)
+
+            st.divider()
+            st.success(f"{len(consolidated_df):,} rows across {n_periods} period(s).")
+            st.dataframe(
+                consolidated_df[["Section", "Account"] + period_labels],
+                use_container_width=True,
+            )
+
+            excel_bytes = tool5_export_consolidated_pnl_excel(consolidated_df, period_labels)
+            st.download_button(
+                label="Download Consolidated P&L (Excel)",
+                data=excel_bytes,
+                file_name="hps_consolidated_portfolio_pnl.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+            )
+
+        st.divider()
+        if st.button("← Back", key="tool5_fin_stmt_back"):
+            st.session_state.tool5_step = "choose_prep_path"
             st.rerun()
 
     # ── STEP: UNIT ECONOMICS — DEPARTMENT CLEANUP ─────────────────────────────
