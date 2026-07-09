@@ -474,12 +474,9 @@ def tool5_reconcile(portfolio_raw, property_raw, gl_raw):
 TOOL5_OWNED_ENTITIES = {"CBTS LP", "CIF LP", "PBC LP", "KES LP", "CBC LP", "CinCB LP", "SinCB LP"}
 
 
-def tool5_build_account_universe(portfolio_raw, property_raw):
-    """The account universe for unit-economics extraction must include accounts
-    that net to zero at the Portfolio level (pure reallocation accounts, e.g.
-    "Admin OH Expenses Split by Unit") but still carry real per-property detail
-    on the Property-level P&L. Anchoring on Portfolio alone would silently drop
-    those accounts' GL transactions from the extraction."""
+def tool5_parse_period_pnls(portfolio_raw, property_raw):
+    """Parse a single period's Portfolio and Property-level P&L into their
+    per-account, per-section DataFrames (see tool5_parse_pnl_sections)."""
     portfolio_header = portfolio_raw.iloc[0]
     p_first_data_col = tool5_find_first_data_col(portfolio_header)
     p_total_col = portfolio_raw.shape[1] - 1
@@ -490,20 +487,38 @@ def tool5_build_account_universe(portfolio_raw, property_raw):
     pr_total_col = property_raw.shape[1] - 1
     property_df = tool5_parse_pnl_sections(property_raw, 2, pr_first_data_col, pr_total_col)
 
-    account_section = dict(zip(portfolio_df["Account"], portfolio_df["Section"]))
-    for account, section in zip(property_df["Account"], property_df["Section"]):
-        account_section.setdefault(account, section)
+    return portfolio_df, property_df
 
-    # Some accounts (e.g. "Trip Insurance") appear under more than one section
-    # (both Income and Expense) — a flat Account->Section dict can only keep
-    # one, silently dropping the other. Track the full set of sections per
-    # account so extraction can split these into distinct account labels.
-    dup_account_sections = {}
-    for account, section in zip(portfolio_df["Account"], portfolio_df["Section"]):
-        dup_account_sections.setdefault(account, set()).add(section)
-    dup_account_sections = {a: s for a, s in dup_account_sections.items() if len(s) > 1}
 
-    expanded_accounts = set(portfolio_df["Account"]) | set(property_df["Account"])
+def tool5_build_account_universe(portfolio_df_list, property_df_list):
+    """Combine every uploaded period's parsed Portfolio/Property P&L into one
+    global account universe, section lookup, and duplicate-section account
+    map. This must be computed across ALL periods together, not per-period —
+    otherwise an account that's only ambiguous in some periods (e.g. "Trip
+    Insurance" showing under both Income and Expense in one year but only
+    Income in another) would get split in one period's data but not
+    another's, producing inconsistent account labels once periods are
+    combined. The account universe itself must include accounts that net to
+    zero at the Portfolio level (pure reallocation accounts, e.g. "Admin OH
+    Expenses Split by Unit") but still carry real per-property detail on the
+    Property-level P&L — anchoring on Portfolio alone would silently drop
+    those accounts' GL transactions from the extraction."""
+    account_section = {}
+    dup_candidate_sections = {}
+    expanded_accounts = set()
+
+    for portfolio_df in portfolio_df_list:
+        for account, section in zip(portfolio_df["Account"], portfolio_df["Section"]):
+            account_section.setdefault(account, section)
+            dup_candidate_sections.setdefault(account, set()).add(section)
+        expanded_accounts |= set(portfolio_df["Account"])
+
+    for property_df in property_df_list:
+        for account, section in zip(property_df["Account"], property_df["Section"]):
+            account_section.setdefault(account, section)
+        expanded_accounts |= set(property_df["Account"])
+
+    dup_account_sections = {a: s for a, s in dup_candidate_sections.items() if len(s) > 1}
     return expanded_accounts, account_section, dup_account_sections
 
 
@@ -619,13 +634,19 @@ def tool5_apply_corporate_filter(df):
 
 
 def tool5_apply_pnl_sign(df):
-    """Flip Amount's sign for Income/Other Income accounts so revenue displays
-    as positive, matching how the P&L reports show it, rather than the GL's
-    raw Debit-minus-Credit accounting convention (where revenue is negative)."""
+    """Flip every transaction's sign uniformly (Amount = -raw Amount), so a
+    positive Amount always means "increases Net Income" and negative always
+    means "decreases Net Income" — regardless of Section. This one identity
+    holds for every account because the GL's raw Debit-minus-Credit sign is
+    already recorded per transaction line, not per account category: a normal
+    revenue credit flips to positive, but a refund/credit-memo against revenue
+    (a debit) flips to negative, correctly staying negative; a normal expense
+    debit flips to negative, but a reversal/credit against an expense flips to
+    positive, correctly showing it improved Net Income. No Section lookup is
+    needed, and summing this column for any subset of rows gives that
+    subset's Net Income directly."""
     df = df.copy()
-    df["Amount"] = df.apply(
-        lambda r: -r["Amount"] if r["Section"] in TOOL5_INCOME_SECTIONS else r["Amount"], axis=1
-    )
+    df["Amount"] = -df["Amount"]
     return df
 
 
@@ -2819,16 +2840,22 @@ elif st.session_state.tool == "tool5":
         with col3:
             if st.button("Continue to Unit Economics Prep →", type="primary", use_container_width=True, key="tool5_to_prep"):
                 with st.spinner("Extracting Owner/Property/Department from the GL..."):
-                    unit_econ_pieces = []
-                    for portfolio_raw, property_raw, gl_raw in zip(
-                        st.session_state.tool5_portfolio_raw_list,
-                        st.session_state.tool5_property_raw_list,
-                        st.session_state.tool5_gl_raw_list,
+                    portfolio_dfs, property_dfs = [], []
+                    for portfolio_raw, property_raw in zip(
+                        st.session_state.tool5_portfolio_raw_list, st.session_state.tool5_property_raw_list
                     ):
-                        expanded_accounts, account_section, dup_account_sections = tool5_build_account_universe(portfolio_raw, property_raw)
-                        unit_econ_pieces.append(
-                            tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section, dup_account_sections)
-                        )
+                        portfolio_df, property_df = tool5_parse_period_pnls(portfolio_raw, property_raw)
+                        portfolio_dfs.append(portfolio_df)
+                        property_dfs.append(property_df)
+
+                    expanded_accounts, account_section, dup_account_sections = tool5_build_account_universe(
+                        portfolio_dfs, property_dfs
+                    )
+
+                    unit_econ_pieces = [
+                        tool5_extract_unit_economics(gl_raw, expanded_accounts, account_section, dup_account_sections)
+                        for gl_raw in st.session_state.tool5_gl_raw_list
+                    ]
                     unit_econ_raw = pd.concat(unit_econ_pieces, ignore_index=True)
                 st.session_state.tool5_unit_econ_raw_df = unit_econ_raw
                 st.session_state.tool5_dept_remap = None
