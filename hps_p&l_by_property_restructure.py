@@ -2838,7 +2838,7 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_net_income_check_df = pd.DataFrame()
                 st.rerun()
         with col3:
-            if st.button("Continue to Unit Economics Prep →", type="primary", use_container_width=True, key="tool5_to_prep"):
+            if st.button("Continue to Data Preparation →", type="primary", use_container_width=True, key="tool5_to_prep"):
                 with st.spinner("Extracting Owner/Property/Department from the GL..."):
                     portfolio_dfs, property_dfs = [], []
                     for portfolio_raw, property_raw in zip(
@@ -2859,8 +2859,73 @@ elif st.session_state.tool == "tool5":
                     unit_econ_raw = pd.concat(unit_econ_pieces, ignore_index=True)
                 st.session_state.tool5_unit_econ_raw_df = unit_econ_raw
                 st.session_state.tool5_dept_remap = None
-                st.session_state.tool5_step = "prep_department"
+                st.session_state.tool5_step = "choose_prep_path"
                 st.rerun()
+
+    # ── STEP: CHOOSE DATA PREP PATH ───────────────────────────────────────────
+
+    elif st.session_state.tool5_step == "choose_prep_path":
+
+        st.subheader("What do you want to prepare?")
+        st.caption("The reconciled GL data is ready. Choose which downstream dataset to prepare next.")
+
+        card_style = """
+            <style>
+            div[data-testid="stVerticalBlock"] div[data-testid="stVerticalBlockBorderWrapper"] {
+                height: 100%;
+            }
+            </style>
+        """
+        st.markdown(card_style, unsafe_allow_html=True)
+
+        PREP_PATHS = [
+            {
+                "key": "tool5_path_unit_econ",
+                "title": "Property Level P&L",
+                "subtitle": "Unit Economics",
+                "description": "Extract Owner/Property/Department detail from the GL and prepare a clean, per-property P&L dataset.",
+                "enabled": True,
+                "next_step": "prep_department",
+            },
+            {
+                "key": "tool5_path_fin_stmt",
+                "title": "Financial Statement",
+                "subtitle": "Coming soon",
+                "description": "Prepare data for a consolidated financial statement.",
+                "enabled": False,
+                "next_step": None,
+            },
+            {
+                "key": "tool5_path_corp_dash",
+                "title": "Corporate Expenses Dashboard",
+                "subtitle": "Coming soon",
+                "description": "Prepare data for the corporate expenses dashboard.",
+                "enabled": False,
+                "next_step": None,
+            },
+        ]
+
+        cols = st.columns(3, gap="large")
+        for col, path in zip(cols, PREP_PATHS):
+            with col:
+                with st.container(border=True):
+                    st.markdown(f"#### {path['title']}")
+                    st.caption(path["subtitle"])
+                    st.write(path["description"])
+                    if st.button(
+                        "Select" if path["enabled"] else "Coming Soon",
+                        key=path["key"],
+                        use_container_width=True,
+                        type="primary" if path["enabled"] else "secondary",
+                        disabled=not path["enabled"],
+                    ):
+                        st.session_state.tool5_step = path["next_step"]
+                        st.rerun()
+
+        st.divider()
+        if st.button("← Back to Reconciliation", key="tool5_choose_path_back"):
+            st.session_state.tool5_step = "reconcile"
+            st.rerun()
 
     # ── STEP: UNIT ECONOMICS — DEPARTMENT CLEANUP ─────────────────────────────
 
