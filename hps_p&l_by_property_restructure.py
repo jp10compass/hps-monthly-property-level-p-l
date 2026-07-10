@@ -352,26 +352,45 @@ def tool5_parse_pnl_sections(raw_df, body_start_row, first_data_col, total_col_i
     return pd.DataFrame(records, columns=["Section", "Account", "Total"])
 
 
-def tool5_build_pnl_account_set(portfolio_raw_list):
-    """Collect every leaf account name appearing on any uploaded Portfolio
-    P&L (across all periods), excluding section header rows (Income, Cost of
-    Goods Sold, ...) and subtotal/rollup rows (Total ..., Gross Profit, Net
-    Ordinary/Other Income, Net Income). Used to restrict the Financial
-    Statements GL export to real Income Statement accounts, excluding Balance
-    Sheet / vendor-type accounts that share the GL's "SICB Management" class
-    but never appear on a P&L (bank accounts, credit cards, inventory, LP
-    entity names, etc.)."""
-    accounts = set()
+def tool5_build_pnl_account_sections(portfolio_raw_list):
+    """Map each leaf account on the uploaded Portfolio P&L(s) to its section
+    (Income, Cost of Goods Sold, Expense, Other Income, Other Expense),
+    excluding section header rows and subtotal/rollup rows (Total ..., Gross
+    Profit, Net Ordinary/Other Income, Net Income). An account that appears
+    under more than one section across any uploaded file (e.g. an account
+    used as both Income and Expense) can't be assigned a single section
+    account-wide, so it's returned separately as a dup account — the caller
+    must disambiguate those per-transaction."""
+    section_candidates = {}
     for portfolio_raw in portfolio_raw_list:
         header_row = portfolio_raw.iloc[0]
         first_data_col = tool5_find_first_data_col(header_row)
         label_columns = list(range(0, first_data_col))
+        current_section = None
         for _, row in portfolio_raw.iloc[1:].iterrows():
             label = get_account_label(row, label_columns)
-            if not label or label in TOOL5_SECTION_LABELS or tool5_is_rollup_account(label):
+            if not label:
                 continue
-            accounts.add(label)
-    return accounts
+            if label in TOOL5_SECTION_LABELS:
+                current_section = label
+                continue
+            if tool5_is_rollup_account(label):
+                continue
+            section_candidates.setdefault(label, set()).add(current_section)
+
+    dup_accounts = {a for a, s in section_candidates.items() if len(s) > 1}
+    account_section = {a: next(iter(s)) for a, s in section_candidates.items() if len(s) == 1}
+    return account_section, dup_accounts
+
+
+def tool5_build_pnl_account_set(portfolio_raw_list):
+    """Every leaf account name appearing on any uploaded Portfolio P&L (across
+    all periods). Used to restrict the Financial Statements GL export to real
+    Income Statement accounts, excluding Balance Sheet / vendor-type accounts
+    that share the GL's "SICB Management" class but never appear on a P&L
+    (bank accounts, credit cards, inventory, LP entity names, etc.)."""
+    account_section, dup_accounts = tool5_build_pnl_account_sections(portfolio_raw_list)
+    return set(account_section) | dup_accounts
 
 
 def tool5_extract_portfolio_net_income_by_month(portfolio_raw_list):
@@ -413,14 +432,22 @@ def tool5_build_financial_statements_base(gl_raw_list, portfolio_raw_list):
     Class == "SICB Management", restricted to real Income Statement accounts
     (tool5_build_pnl_account_set) to exclude Balance Sheet / vendor accounts.
     Every original GL column is preserved (for the detail export), plus
-    Accounting Period (month-end of Date). Amount is flipped from the GL's
-    raw Debit-minus-Credit sign to the standard P&L convention (positive =
-    revenue / increases Net Income, negative = expense). Department is
-    cleaned via tool5_default_department with blank/NaN filled to "" (a
-    blank department is a real, valid value — not filling it would make
-    those transactions vanish under groupby, which excludes NaN keys by
-    default) so both exports share one consistent Department value."""
-    pnl_accounts = tool5_build_pnl_account_set(portfolio_raw_list)
+    Accounting Period (month-end of Date). Amount sign matches how the
+    Portfolio P&L itself displays it — both Income and Expense lines are
+    positive there, since the report's structure (not the sign) shows what
+    subtracts from Net Income — so only Income / Other Income accounts are
+    flipped from the GL's raw Debit-minus-Credit sign; Expense / COGS / Other
+    Expense keep the GL's raw sign as-is (same convention already used by
+    tool5_reconcile's "GL Total (Adjusted)"). An account used as both Income
+    and Expense in different transactions (e.g. "Trip Insurance") is
+    disambiguated per-transaction via the GL's own Item column prefix, exactly
+    like tool5_reconcile does. Department is cleaned via
+    tool5_default_department with blank/NaN filled to "" (a blank department
+    is a real, valid value — not filling it would make those transactions
+    vanish under groupby, which excludes NaN keys by default) so both exports
+    share one consistent Department value."""
+    account_section, dup_accounts = tool5_build_pnl_account_sections(portfolio_raw_list)
+    pnl_accounts = set(account_section) | dup_accounts
 
     pieces = []
     for gl_raw in gl_raw_list:
@@ -433,7 +460,26 @@ def tool5_build_financial_statements_base(gl_raw_list, portfolio_raw_list):
         ].copy()
         real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
         real["Department"] = real["Department"].apply(tool5_default_department).fillna("") if "Department" in real.columns else ""
-        real["Amount"] = -pd.to_numeric(real["Amount"], errors="coerce")
+
+        is_dup = real["Account"].isin(dup_accounts)
+        section = real["Account"].map(account_section)
+        if "Item" in real.columns:
+            item_prefix = real["Item"].astype(str).str.split(":").str[0]
+        else:
+            item_prefix = pd.Series("", index=real.index)
+        is_income_dup = item_prefix == "Income"
+        dup_section = is_income_dup.map({True: "Income", False: "Expense"})
+        section = section.where(~is_dup, dup_section)
+
+        # A dup account (e.g. "Trip Insurance" as both Income and Expense) is
+        # renamed per-transaction so the two don't collapse into one row —
+        # same convention tool5_extract_unit_economics already uses.
+        renamed = real["Account"] + is_income_dup.map({True: " Income", False: " Expenses"})
+        real["Account"] = real["Account"].where(~is_dup, renamed)
+
+        amount = pd.to_numeric(real["Amount"], errors="coerce")
+        flip_mask = section.isin(TOOL5_INCOME_SECTIONS)
+        real["Amount"] = amount.where(~flip_mask, -amount)
         pieces.append(real)
 
     return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
