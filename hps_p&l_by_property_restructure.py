@@ -352,84 +352,142 @@ def tool5_parse_pnl_sections(raw_df, body_start_row, first_data_col, total_col_i
     return pd.DataFrame(records, columns=["Section", "Account", "Total"])
 
 
-def tool5_build_consolidated_portfolio_pnl(portfolio_raw_list, period_labels):
-    """Consolidate multiple periods' Portfolio P&L into one flat table: every
-    row from the original report (leaf accounts AND subtotal/rollup rows like
-    "Total Markup" or "Net Income") is kept, aligned across periods by Account
-    name. An account that only exists in some periods still gets its own row,
-    blank for the periods where it's absent. Row order is an ordered merge
-    across periods: the first period sets the initial order, and any account
-    introduced only in a later period is inserted right after the nearest
-    account it follows in that period's own order (rather than appended at
-    the very end), so a brand-new account still lands in its natural section
-    instead of trailing after Net Income."""
-    period_dfs = []
+def tool5_build_pnl_account_set(portfolio_raw_list):
+    """Collect every leaf account name appearing on any uploaded Portfolio
+    P&L (across all periods), excluding section header rows (Income, Cost of
+    Goods Sold, ...) and subtotal/rollup rows (Total ..., Gross Profit, Net
+    Ordinary/Other Income, Net Income). Used to restrict the Financial
+    Statements GL export to real Income Statement accounts, excluding Balance
+    Sheet / vendor-type accounts that share the GL's "SICB Management" class
+    but never appear on a P&L (bank accounts, credit cards, inventory, LP
+    entity names, etc.)."""
+    accounts = set()
     for portfolio_raw in portfolio_raw_list:
-        header = portfolio_raw.iloc[0]
-        first_data_col = tool5_find_first_data_col(header)
+        header_row = portfolio_raw.iloc[0]
+        first_data_col = tool5_find_first_data_col(header_row)
+        label_columns = list(range(0, first_data_col))
+        for _, row in portfolio_raw.iloc[1:].iterrows():
+            label = get_account_label(row, label_columns)
+            if not label or label in TOOL5_SECTION_LABELS or tool5_is_rollup_account(label):
+                continue
+            accounts.add(label)
+    return accounts
+
+
+def tool5_extract_portfolio_net_income_by_month(portfolio_raw_list):
+    """Pull the Portfolio P&L's own "Net Income" row for every month column
+    (excluding the trailing TOTAL) across all uploaded periods, as the
+    invented "Net Income" line for the Financial Statements long table — this
+    is the report's own bottom line, not something computed from the GL."""
+    records = []
+    for portfolio_raw in portfolio_raw_list:
+        header_row = portfolio_raw.iloc[0]
+        first_data_col = tool5_find_first_data_col(header_row)
         total_col = portfolio_raw.shape[1] - 1
-        period_dfs.append(tool5_parse_pnl_sections(portfolio_raw, 1, first_data_col, total_col, include_rollups=True))
+        net_income_rows = portfolio_raw.index[portfolio_raw[0] == "Net Income"]
+        if len(net_income_rows) == 0:
+            raise ValueError("Portfolio P&L: could not find a 'Net Income' row.")
+        net_income_row = portfolio_raw.iloc[net_income_rows[0]]
 
-    row_order = []
-    seen = set()
-    section_lookup = {}
-    for period_df in period_dfs:
-        insert_at = 0
-        for account, section in zip(period_df["Account"], period_df["Section"]):
-            if account in seen:
-                insert_at = row_order.index(account) + 1
+        for col_idx in range(first_data_col, total_col):
+            label = header_row.iloc[col_idx]
+            if isinstance(label, pd.Timestamp):
+                period_date = (label + pd.offsets.MonthEnd(0)).date()
             else:
-                seen.add(account)
-                row_order.insert(insert_at, account)
-                section_lookup[account] = "" if tool5_is_rollup_account(account) else section
-                insert_at += 1
-
-    consolidated = pd.DataFrame({
-        "Section": [section_lookup[a] for a in row_order],
-        "Account": row_order,
-        "Is Rollup": [tool5_is_rollup_account(a) for a in row_order],
-    })
-
-    for label, period_df in zip(period_labels, period_dfs):
-        totals = period_df.set_index("Account")["Total"]
-        consolidated[label] = consolidated["Account"].map(totals)
-
-    return consolidated
+                period_date = (pd.to_datetime(str(label).strip(), format="%b %y") + pd.offsets.MonthEnd(0)).date()
+            value = net_income_row.iloc[col_idx]
+            if pd.isna(value):
+                continue
+            records.append({
+                "Accounting Period": period_date,
+                "Account": "Net Income",
+                "Department": "",
+                "Amount": value,
+            })
+    return pd.DataFrame(records, columns=["Accounting Period", "Account", "Department", "Amount"])
 
 
-def tool5_export_consolidated_pnl_excel(consolidated_df, period_labels):
-    """Write the consolidated Portfolio P&L to an .xlsx with subtotal/rollup
-    rows (Total ..., Gross Profit, Net Ordinary Income, Net Other Income, Net
-    Income) bolded and top-bordered so they visually stand apart from leaf
-    accounts, the way a printed financial statement would."""
+def tool5_build_financial_statements_base(gl_raw_list, portfolio_raw_list):
+    """Filter the uploaded GL Transaction Detail files down to the real,
+    P&L-relevant transactions shared by both Financial Statements exports:
+    Class == "SICB Management", restricted to real Income Statement accounts
+    (tool5_build_pnl_account_set) to exclude Balance Sheet / vendor accounts.
+    Every original GL column is preserved (for the detail export), plus
+    Accounting Period (month-end of Date). Amount is flipped from the GL's
+    raw Debit-minus-Credit sign to the standard P&L convention (positive =
+    revenue / increases Net Income, negative = expense). Department is
+    cleaned via tool5_default_department with blank/NaN filled to "" (a
+    blank department is a real, valid value — not filling it would make
+    those transactions vanish under groupby, which excludes NaN keys by
+    default) so both exports share one consistent Department value."""
+    pnl_accounts = tool5_build_pnl_account_set(portfolio_raw_list)
+
+    pieces = []
+    for gl_raw in gl_raw_list:
+        gl = gl_raw.copy()
+        gl.columns = gl.columns.astype(str).str.strip()
+        real = gl[
+            gl["Type"].notna() & gl["Account"].notna()
+            & (gl["Class"] == "SICB Management")
+            & gl["Account"].isin(pnl_accounts)
+        ].copy()
+        real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
+        real["Department"] = real["Department"].apply(tool5_default_department).fillna("") if "Department" in real.columns else ""
+        real["Amount"] = -pd.to_numeric(real["Amount"], errors="coerce")
+        pieces.append(real)
+
+    return pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+
+
+def tool5_build_financial_statements_grouped(gl_raw_list, portfolio_raw_list):
+    """Export 1 — one row per Accounting Period + Account + Department,
+    summed Amount, plus a "Net Income" row per month sourced directly from
+    the Portfolio P&L's own Net Income line (tool5_extract_portfolio_net_income_by_month)
+    rather than derived from the GL."""
+    base = tool5_build_financial_statements_base(gl_raw_list, portfolio_raw_list)
+    grouped = base.groupby(["Accounting Period", "Department", "Account"], as_index=False)["Amount"].sum()
+    grouped = grouped[["Accounting Period", "Account", "Department", "Amount"]]
+
+    net_income_df = tool5_extract_portfolio_net_income_by_month(portfolio_raw_list)
+
+    combined = pd.concat([grouped, net_income_df], ignore_index=True)
+    combined = combined.sort_values(["Accounting Period", "Account", "Department"]).reset_index(drop=True)
+    return combined
+
+
+def tool5_build_financial_statements_detail(gl_raw_list, portfolio_raw_list):
+    """Export 2 — the same filtered, P&L-sign-flipped transactions as the
+    grouped export (same Class == "SICB Management" + P&L-account
+    restriction, across all uploaded periods), but one row per raw GL
+    transaction with every original GL column retained, not grouped."""
+    base = tool5_build_financial_statements_base(gl_raw_list, portfolio_raw_list)
+    ordered_cols = ["Accounting Period"] + [c for c in base.columns if c != "Accounting Period"]
+    return base[ordered_cols].sort_values(["Accounting Period", "Account"]).reset_index(drop=True)
+
+
+def tool5_export_financial_statements_excel(df, sheet_name="Financial Statements"):
+    """Write a Financial Statements export to an .xlsx with no pandas index,
+    a bold header row, and Amount number-formatted."""
     import io
-    from openpyxl.styles import Font, Border, Side
-
-    export_df = consolidated_df[["Section", "Account"] + list(period_labels)]
-    n_cols = export_df.shape[1]
-    first_period_col = 3  # 1-indexed: Section=1, Account=2, periods start at 3
+    from openpyxl.styles import Font
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        export_df.to_excel(writer, index=False, sheet_name="Consolidated P&L")
-        worksheet = writer.sheets["Consolidated P&L"]
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        worksheet = writer.sheets[sheet_name]
 
         bold_font = Font(bold=True)
-        top_border = Border(top=Side(style="thin"))
         number_format = "#,##0.00;(#,##0.00)"
+        amount_col = df.columns.get_loc("Amount") + 1
 
-        for row_offset, is_rollup in enumerate(consolidated_df["Is Rollup"]):
-            excel_row = row_offset + 2
-            for col in range(first_period_col, n_cols + 1):
-                worksheet.cell(row=excel_row, column=col).number_format = number_format
-            if is_rollup:
-                for col in range(1, n_cols + 1):
-                    cell = worksheet.cell(row=excel_row, column=col)
-                    cell.font = bold_font
-                    cell.border = top_border
+        for col_idx in range(1, len(df.columns) + 1):
+            worksheet.cell(row=1, column=col_idx).font = bold_font
 
-        for col_idx, column in enumerate(export_df.columns, start=1):
-            max_len = max([len(str(column))] + [len(str(v)) for v in export_df[column].fillna("")])
+        for row_offset in range(len(df)):
+            worksheet.cell(row=row_offset + 2, column=amount_col).number_format = number_format
+
+        for col_idx, column in enumerate(df.columns, start=1):
+            max_len = max([len(str(column))] + [len(str(v)) for v in df[column].fillna("")])
             worksheet.column_dimensions[worksheet.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 40)
 
     return buffer.getvalue()
@@ -2976,9 +3034,9 @@ elif st.session_state.tool == "tool5":
             },
             {
                 "key": "tool5_path_fin_stmt",
-                "title": "Financial Statement",
-                "subtitle": "Consolidated Portfolio P&L",
-                "description": "Consolidate the uploaded periods' Portfolio P&L into one flat, aligned export, ready for your mapping workbook.",
+                "title": "Financial Statements",
+                "subtitle": "GL Long Table",
+                "description": "Extract SICB Management, Income-Statement-only GL transactions across all uploaded periods into a grouped summary and a full transaction detail export.",
                 "enabled": True,
                 "next_step": "fin_stmt_export",
             },
@@ -3014,52 +3072,60 @@ elif st.session_state.tool == "tool5":
             st.session_state.tool5_step = "reconcile"
             st.rerun()
 
-    # ── STEP: FINANCIAL STATEMENT — CONSOLIDATED PORTFOLIO P&L ───────────────
+    # ── STEP: FINANCIAL STATEMENTS — GL LONG TABLE ────────────────────────────
 
     elif st.session_state.tool5_step == "fin_stmt_export":
 
-        st.subheader("Consolidated Portfolio P&L")
+        st.subheader("Financial Statements")
         st.caption(
-            "Every row from each uploaded period's Portfolio P&L — leaf accounts and subtotal/rollup rows alike "
-            "(Total ..., Gross Profit, Net Ordinary Income, Net Other Income, Net Income) — aligned into one flat "
-            "table. An account that only appears in some periods still gets its own row, blank for the periods "
-            "where it's absent. This is the raw account-level data, not yet mapped to your Financial Statement "
-            "line categories — bring it into your mapping workbook as the source for VLOOKUP/SUMIFS."
+            "Sourced from the uploaded GL Transaction Detail files across all periods — filtered to Class = "
+            "SICB Management and restricted to real Income Statement accounts (Balance Sheet / vendor accounts "
+            "excluded). Amount is signed like a P&L (positive = revenue, negative = expense)."
         )
 
         portfolio_raw_list = st.session_state.tool5_portfolio_raw_list
-        n_periods = len(portfolio_raw_list)
+        gl_raw_list = st.session_state.tool5_gl_raw_list
 
-        st.write("**Label each period** (used as the column header below):")
-        period_cols = st.columns(n_periods)
-        period_labels = []
-        for i, col in enumerate(period_cols, start=1):
-            with col:
-                default_label = f"Period {i}"
-                label = st.text_input(f"Period {i}", value=default_label, key=f"tool5_fin_stmt_label_{i}")
-                period_labels.append(label.strip() if label.strip() else default_label)
+        with st.spinner("Building Financial Statements exports..."):
+            grouped_df = tool5_build_financial_statements_grouped(gl_raw_list, portfolio_raw_list)
+            detail_df = tool5_build_financial_statements_detail(gl_raw_list, portfolio_raw_list)
 
-        if len(set(period_labels)) != len(period_labels):
-            st.error("Period labels must be unique.")
-        else:
-            consolidated_df = tool5_build_consolidated_portfolio_pnl(portfolio_raw_list, period_labels)
+        st.divider()
 
-            st.divider()
-            st.success(f"{len(consolidated_df):,} rows across {n_periods} period(s).")
-            st.dataframe(
-                consolidated_df[["Section", "Account"] + period_labels],
-                use_container_width=True,
-            )
+        st.subheader("Export 1 — Grouped")
+        st.caption(
+            "One row per Accounting Period + Account + Department, summed Amount, plus a 'Net Income' row per "
+            "month taken directly from the Portfolio P&L's own Net Income line."
+        )
+        st.success(f"{len(grouped_df):,} rows.")
+        st.dataframe(grouped_df, use_container_width=True)
+        grouped_excel = tool5_export_financial_statements_excel(grouped_df, sheet_name="Grouped")
+        st.download_button(
+            label="Download Grouped (Excel)",
+            data=grouped_excel,
+            file_name="hps_financial_statements_grouped.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+            key="tool5_fin_stmt_download_grouped",
+        )
 
-            excel_bytes = tool5_export_consolidated_pnl_excel(consolidated_df, period_labels)
-            st.download_button(
-                label="Download Consolidated P&L (Excel)",
-                data=excel_bytes,
-                file_name="hps_consolidated_portfolio_pnl.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True,
-            )
+        st.divider()
+
+        st.subheader("Export 2 — Full Transaction Detail")
+        st.caption("Same filtered transactions as Export 1, one row per raw GL transaction, every GL field retained, not grouped.")
+        st.success(f"{len(detail_df):,} rows.")
+        st.dataframe(detail_df, use_container_width=True)
+        detail_excel = tool5_export_financial_statements_excel(detail_df, sheet_name="Detail")
+        st.download_button(
+            label="Download Full Detail (Excel)",
+            data=detail_excel,
+            file_name="hps_financial_statements_detail.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+            key="tool5_fin_stmt_download_detail",
+        )
 
         st.divider()
         if st.button("← Back", key="tool5_fin_stmt_back"):
