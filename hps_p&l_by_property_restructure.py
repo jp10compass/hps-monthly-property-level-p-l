@@ -1035,6 +1035,11 @@ TOOL5_CORP_ACCOUNT_CATEGORY_MAP = {
     "Website Fees": "Other Marketing Expenses",
     "Dues and Subscriptions": "Dues and Subscriptions",
     "Software": "Software",
+    # Not in the standard mapping file — QuickBooks classifies these under
+    # Professional Fees. Both are $0.00 placeholder/reclass entries in every
+    # period seen so far, so the category has no real dollar impact.
+    "Guest Services": "Professional Fees",
+    "Owner Services": "Professional Fees",
     # Payroll accounts — finer categories, overriding the file's "Payroll Costs".
     "Health Insurance": "Taxes & Benefits",
     "Paid Time Off": "Taxes & Benefits",
@@ -1097,11 +1102,39 @@ TOOL5_CORP_EXPORT_COLUMNS = [
     "Property Owner Type", "Expense Category", "Memo", "Source Name", "Amount",
 ]
 
-# OTA Fees is Cost of Goods Sold in the standard account mapping, but on some
-# periods' Portfolio P&L it's booked under the live "Expense" section header
-# instead — excluded here to match the standard mapping's classification
-# rather than that period's drifted section placement.
-TOOL5_CORP_ACCOUNT_HARD_EXCLUDE = {"OTA Fees"}
+# Every account the standard mapping classifies as Income, Cost of Goods
+# Sold, Other Income, or Other Expense. Excluded here regardless of what
+# section a given period's live Portfolio P&L happens to place them under —
+# some accounts (e.g. OTA Fees, Interest Expense) drift onto the live
+# "Expense" section header in certain periods even though the standard
+# mapping puts them elsewhere, so the mapping's classification wins over that
+# period's structural placement.
+TOOL5_CORP_NON_EXPENSE_ACCOUNTS = {
+    # Income
+    "Booking Income", "Cleaning Fees", "Credit Card Income", "Damage Income",
+    "Linen Program Fee Income", "Management Fee Income", "Markup - Appliance",
+    "Markup - Cleaning", "Markup - Furniture", "Markup - Guest Expenses",
+    "Markup - Licenses and Permits", "Markup - Locks", "Markup - Materials",
+    "Markup - Photos", "Markup - Postage", "Markup - Pool", "Markup - Repair Labor",
+    "Markup - Staging", "Markup - Unit Inventory", "Markups", "Markup",
+    "Airbnb Booking Fee", "Booking.com Commission", "Break Fee Income",
+    "Cancellation Insurance", "Chargeback", "Early/Late Fee Check In/Out",
+    "Expedia Commission", "Float Fees Forfeited", "Home Away Commission",
+    "Lease Application Fee", "Occupancy Violation", "Pool Heating",
+    "Referral Income", "Refund Cancellation", "Reimbursed Income",
+    "Rentals United Commission", "Storage Locker Rental Income",
+    "Trip Insurance Income", "Pet Fees", "Rent",
+    # Cost of Goods Sold
+    "Credit Card Fees", "Guest Expenses", "Linen Program Fee",
+    "Owners Reimbursement", "OTA Fees", "Owners Proceed",
+    # Other Expense
+    "Admin OH Expenses Split by Unit", "Insurance Reimbursement", "Interest Expense",
+    "R&M OH Expenses Split by Unit", "Transfer FROM Float Fees",
+    "Transfer FROM Reserve Funds", "Transfer FROM Unit", "Write Off",
+    # Other Income
+    "Interest Income", "Other Income Drew", "Tax Collection Allowance",
+    "Transfer TO Float Fees", "Transfer TO Reserve Fund", "Transfer TO Unit",
+}
 
 
 def tool5_corp_extract(gl_raw_list, portfolio_raw_list):
@@ -1156,7 +1189,7 @@ def tool5_corp_extract(gl_raw_list, portfolio_raw_list):
         real["Account"] = real["Account"].where(~is_dup, renamed)
 
         real = real[section == "Expense"]
-        real = real[~real["Account"].isin(TOOL5_CORP_ACCOUNT_HARD_EXCLUDE)]
+        real = real[~real["Account"].isin(TOOL5_CORP_NON_EXPENSE_ACCOUNTS)]
         if real.empty:
             continue
 
