@@ -465,30 +465,9 @@ def tool5_build_financial_statements_detail(gl_raw_list, portfolio_raw_list):
     return base[ordered_cols].sort_values(["Accounting Period", "Account"]).reset_index(drop=True)
 
 
-def tool5_export_financial_statements_excel(df, sheet_name="Financial Statements"):
-    """Write a Financial Statements export to an .xlsx with no pandas index,
-    a bold header row, and Amount number-formatted."""
-    import io
-    from openpyxl.styles import Font
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-        worksheet = writer.sheets[sheet_name]
-
-        bold_font = Font(bold=True)
-        number_format = "#,##0.00;(#,##0.00)"
-        amount_col = df.columns.get_loc("Amount") + 1
-
-        for col_idx in range(1, len(df.columns) + 1):
-            worksheet.cell(row=1, column=col_idx).font = bold_font
-
-        for row_offset in range(len(df)):
-            worksheet.cell(row=row_offset + 2, column=amount_col).number_format = number_format
-
-        for col_idx, column in enumerate(df.columns, start=1):
-            max_len = max([len(str(column))] + [len(str(v)) for v in df[column].fillna("")])
-            worksheet.column_dimensions[worksheet.cell(row=1, column=col_idx).column_letter].width = min(max_len + 2, 40)
+def tool5_export_financial_statements_csv(df):
+    """Write a Financial Statements export to CSV bytes (no pandas index)."""
+    return df.to_csv(index=False).encode("utf-8")
 
     return buffer.getvalue()
 
@@ -3099,12 +3078,12 @@ elif st.session_state.tool == "tool5":
         )
         st.success(f"{len(grouped_df):,} rows.")
         st.dataframe(grouped_df, use_container_width=True)
-        grouped_excel = tool5_export_financial_statements_excel(grouped_df, sheet_name="Grouped")
+        grouped_csv = tool5_export_financial_statements_csv(grouped_df)
         st.download_button(
-            label="Download Grouped (Excel)",
-            data=grouped_excel,
-            file_name="hps_financial_statements_grouped.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            label="Download Grouped (CSV)",
+            data=grouped_csv,
+            file_name="hps_financial_statements_grouped.csv",
+            mime="text/csv",
             type="primary",
             use_container_width=True,
             key="tool5_fin_stmt_download_grouped",
@@ -3116,12 +3095,12 @@ elif st.session_state.tool == "tool5":
         st.caption("Same filtered transactions as Export 1, one row per raw GL transaction, every GL field retained, not grouped.")
         st.success(f"{len(detail_df):,} rows.")
         st.dataframe(detail_df, use_container_width=True)
-        detail_excel = tool5_export_financial_statements_excel(detail_df, sheet_name="Detail")
+        detail_csv = tool5_export_financial_statements_csv(detail_df)
         st.download_button(
-            label="Download Full Detail (Excel)",
-            data=detail_excel,
-            file_name="hps_financial_statements_detail.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            label="Download Full Detail (CSV)",
+            data=detail_csv,
+            file_name="hps_financial_statements_detail.csv",
+            mime="text/csv",
             type="primary",
             use_container_width=True,
             key="tool5_fin_stmt_download_detail",
