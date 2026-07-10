@@ -952,6 +952,252 @@ def tool5_build_net_income_check(unit_econ_df, property_raw_list, merges):
     return pd.DataFrame(rows)
 
 
+### ── TOOL 5: CORPORATE EXPENSES DASHBOARD HELPERS ───────────────────────────
+
+# Account -> Expense Category, sourced from the standard Financial Statements
+# account mapping ("Mapping Level 1"), restricted to the true Expense section
+# (Payroll / G&A / Operations / Sales & Marketing / Technology — excludes
+# Revenue, COGS, and the file's own Other Expense/Other Income rows, which
+# tool5_corp_extract already drops via the P&L Section tag). Payroll accounts
+# are overridden below with finer payroll-specific categories instead of the
+# file's single "Payroll Costs" bucket.
+TOOL5_CORP_ACCOUNT_CATEGORY_MAP = {
+    "Licenses and Permits": "Licenses and Permits",
+    "Bank Service Charges": "People & Admin",
+    "Delivery": "People & Admin",
+    "Management Fee Adjustment": "Management Fee Adjustment",
+    "Management Fees": "Management Fee Expense",
+    "Office Supplies": "People & Admin",
+    "Postage & Delivery": "People & Admin",
+    "Rent Expenses": "People & Admin",
+    "Property-Liability Insurance": "Other G&A",
+    "Trip Insurance Expenses": "Other G&A",
+    "Bad debt": "Other G&A",
+    "Break Fee": "Other G&A",
+    "Lease Application Fees": "Other G&A",
+    "Not Collected Sales Tax": "Other G&A",
+    "Penalty Expense": "Other G&A",
+    "Entertainment": "People & Admin",
+    "Meals": "People & Admin",
+    "Travel": "People & Admin",
+    "Conference": "People & Admin",
+    "Recruiting Expense": "People & Admin",
+    "Training": "People & Admin",
+    "Accounting Fees": "Professional Fees",
+    "Consulting": "Professional Fees",
+    "Legal Fees": "Professional Fees",
+    "Professional Fees": "Professional Fees",
+    "Cable/Internet": "Other G&A",
+    "Electricity & Heat": "Other G&A",
+    "Fax": "Other G&A",
+    "Gas Utility": "Other G&A",
+    "Phone": "Other G&A",
+    "Water & Sewer": "Other G&A",
+    "VA Subcontractor": "VA Subcontractor",
+    "AC Filters": "Maintenance Items & Supplies",
+    "Appliances": "Maintenance Items & Supplies",
+    "Auto Allowance": "Other Maintenance",
+    "Cleaning Inspector": "Cleaning & Laundry Labor",
+    "Cleaning Slippage": "Slippage",
+    "Cleaning Supplies": "Cleaning Supplies & Inventory",
+    "Cleaning Units": "Cleaning & Laundry Labor",
+    "Consumables": "Maintenance Items & Supplies",
+    "Electric": "Maintenance Labor",
+    "Equipment Rental": "Other Maintenance",
+    "Furniture & Decorations": "Maintenance Items & Supplies",
+    "Garage Cleaning": "Cleaning Supplies & Inventory",
+    "Garage Maintenance": "Other Maintenance",
+    "Gas & Maintenance": "Maintenance Labor",
+    "HVAC": "Maintenance Items & Supplies",
+    "HVAC Repairs": "Maintenance Labor",
+    "Inventory Slippage": "Slippage",
+    "Landscape Expense": "Other Maintenance",
+    "Laundry Attendant Payroll": "Cleaning & Laundry Labor",
+    "Linen Inventory": "Cleaning Supplies & Inventory",
+    "Linen Slippage": "Slippage",
+    "Maintenance Slippage": "Slippage",
+    "Materials": "Maintenance Items & Supplies",
+    "Moveable": "Maintenance Items & Supplies",
+    "Parking Lot": "Other Maintenance",
+    "Plumbing": "Maintenance Labor",
+    "Repairs": "Maintenance Labor",
+    "Subcontractor": "Maintenance Labor",
+    "Trash Removal": "Other Maintenance",
+    "Truck Rental": "Other Maintenance",
+    "Unit Inventory": "Cleaning Supplies & Inventory",
+    "Advertising": "Ad & Marketing",
+    "Marketing": "Ad & Marketing",
+    "Referral Bonus": "Sales Bonuses & Promotions",
+    "Sign on Bonus": "Sales Bonuses & Promotions",
+    "Staff Promotion": "Sales Bonuses & Promotions",
+    "Staging Bonus": "Sales Bonuses & Promotions",
+    "Unit Photos": "Other Marketing Expenses",
+    "Website Fees": "Other Marketing Expenses",
+    "Dues and Subscriptions": "Dues and Subscriptions",
+    "Software": "Software",
+    # Payroll accounts — finer categories, overriding the file's "Payroll Costs".
+    "Health Insurance": "Taxes & Benefits",
+    "Paid Time Off": "Taxes & Benefits",
+    "Parental Leave Time Off": "Taxes & Benefits",
+    "Payroll Accounting": "Salaries & Wages",
+    "Payroll Bonus": "Bonuses",
+    "Payroll Clearing": "Payroll Processing Fees",
+    "Payroll Fees": "Payroll Processing Fees",
+    "Payroll Guest Services": "Salaries & Wages",
+    "Payroll Inter Company": "Salaries & Wages",
+    "Payroll Marketing": "Salaries & Wages",
+    "Payroll Mgmt": "Salaries & Wages",
+    "Payroll Operations": "Salaries & Wages",
+    "Payroll Overtime": "Salaries & Wages",
+    "Payroll Owner Services": "Salaries & Wages",
+    "Payroll Taxes": "Taxes & Benefits",
+    "Payroll Vacation": "Taxes & Benefits",
+    "Worker's Compensation": "Taxes & Benefits",
+}
+
+TOOL5_CORP_EXPENSE_CATEGORIES = sorted(set(TOOL5_CORP_ACCOUNT_CATEGORY_MAP.values()))
+
+TOOL5_CORP_PAYROLL_ACCOUNTS = [
+    "Health Insurance",
+    "Paid Time Off",
+    "Parental Leave Time Off",
+    "Payroll Accounting",
+    "Payroll Bonus",
+    "Payroll Clearing",
+    "Payroll Fees",
+    "Payroll Guest Services",
+    "Payroll Inter Company",
+    "Payroll Marketing",
+    "Payroll Mgmt",
+    "Payroll Operations",
+    "Payroll Overtime",
+    "Payroll Owner Services",
+    "Payroll Taxes",
+    "Payroll Vacation",
+    "Worker's Compensation",
+]
+
+TOOL5_CORP_DEFAULT_EXCLUDED_DEPARTMENTS = ["Cleaning-Laundry", "R-M"]
+
+# Operations (Cleaning/Maintenance) and Management Fee categories are excluded
+# by default at export — they're tracked elsewhere and aren't corporate spend.
+TOOL5_CORP_DEFAULT_UNCHECKED_CATEGORIES = {
+    "Maintenance Items & Supplies",
+    "Other Maintenance",
+    "Cleaning & Laundry Labor",
+    "Slippage",
+    "Cleaning Supplies & Inventory",
+    "Maintenance Labor",
+    "Management Fee Adjustment",
+    "Management Fee Expense",
+}
+
+TOOL5_CORP_EXPORT_COLUMNS = [
+    "Accounting Period", "Account", "Department", "Property", "Owner",
+    "Property Owner Type", "Expense Category", "Memo", "Source Name", "Amount",
+]
+
+# OTA Fees is Cost of Goods Sold in the standard account mapping, but on some
+# periods' Portfolio P&L it's booked under the live "Expense" section header
+# instead — excluded here to match the standard mapping's classification
+# rather than that period's drifted section placement.
+TOOL5_CORP_ACCOUNT_HARD_EXCLUDE = {"OTA Fees"}
+
+
+def tool5_corp_extract(gl_raw_list, portfolio_raw_list):
+    """Extract Class == SICB Management, Expense-section-only transactions
+    (Income, Cost of Goods Sold, Other Income, and Other Expense excluded)
+    from every uploaded GL file, restricted to accounts that actually appear
+    on the Portfolio P&L. An account appearing under more than one section
+    (e.g. "Trip Insurance" used as both Income and Expense) is disambiguated
+    per-transaction via the GL's own Item column and renamed with an
+    " Income"/" Expenses" suffix, exactly like tool5_extract_unit_economics /
+    tool5_build_financial_statements_base — only the " Expenses" rows survive
+    the Expense-section filter below, landing on the same account name the
+    standard category mapping uses (e.g. "Trip Insurance Expenses"). Owner/
+    Property/Property Owner Type are derived the same way as
+    tool5_extract_unit_economics (splitting Name on the first ':'). Amount
+    keeps the GL's raw sign untouched — a normal expense debit is positive, a
+    reversal/credit against it is negative."""
+    account_section, dup_accounts = tool5_build_pnl_account_sections(portfolio_raw_list)
+    pnl_accounts = set(account_section) | dup_accounts
+
+    output_columns = [
+        "Accounting Period", "Account", "Department (Raw)", "Department", "Property",
+        "Owner", "Property Owner Type", "Memo", "Source Name", "Amount",
+    ]
+
+    pieces = []
+    for gl_raw in gl_raw_list:
+        gl = gl_raw.copy()
+        gl.columns = gl.columns.astype(str).str.strip()
+        required_cols = {"Type", "Account", "Class", "Name", "Amount", "Date"}
+        missing_cols = required_cols - set(gl.columns)
+        if missing_cols:
+            raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
+
+        real = gl[
+            gl["Type"].notna() & gl["Account"].notna()
+            & (gl["Class"] == "SICB Management")
+            & gl["Account"].isin(pnl_accounts)
+        ].copy()
+
+        is_dup = real["Account"].isin(dup_accounts)
+        section = real["Account"].map(account_section)
+        if "Item" in real.columns:
+            item_prefix = real["Item"].astype(str).str.split(":").str[0]
+        else:
+            item_prefix = pd.Series("", index=real.index)
+        is_income_dup = item_prefix == "Income"
+        dup_section = is_income_dup.map({True: "Income", False: "Expense"})
+        section = section.where(~is_dup, dup_section)
+
+        renamed = real["Account"] + is_income_dup.map({True: " Income", False: " Expenses"})
+        real["Account"] = real["Account"].where(~is_dup, renamed)
+
+        real = real[section == "Expense"]
+        real = real[~real["Account"].isin(TOOL5_CORP_ACCOUNT_HARD_EXCLUDE)]
+        if real.empty:
+            continue
+
+        real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
+
+        split_result = real["Name"].apply(tool5_split_owner_property)
+        real["Owner"] = split_result.apply(lambda t: tool5_clean_owner(t[0]))
+        real["Property"] = split_result.apply(lambda t: t[1] if t[1] == "Corporate" else normalize_property_name(t[1]))
+        real["Property Owner Type"] = real["Owner"].apply(tool5_owner_type)
+
+        real["Department (Raw)"] = real["Department"] if "Department" in real.columns else pd.NA
+        real["Department"] = real["Department (Raw)"].apply(tool5_default_department)
+
+        for col in ["Memo", "Source Name"]:
+            if col not in real.columns:
+                real[col] = pd.NA
+
+        real["Amount"] = pd.to_numeric(real["Amount"], errors="coerce")
+        pieces.append(real[output_columns])
+
+    if not pieces:
+        return pd.DataFrame(columns=output_columns)
+    return pd.concat(pieces, ignore_index=True).reset_index(drop=True)
+
+
+def tool5_corp_apply_payroll_dept_exclusion(df, payroll_accounts, excluded_departments):
+    """Drop transactions for the given payroll accounts when their (cleaned)
+    Department matches one of the given excluded departments — these
+    represent property-operations labor already captured elsewhere, not
+    corporate payroll spend."""
+    mask = df["Account"].isin(payroll_accounts) & df["Department"].isin(excluded_departments)
+    return df[~mask].copy()
+
+
+def tool5_corp_build_export(df):
+    """Final Corporate Expenses Dashboard export shape, sorted for readability."""
+    return df[TOOL5_CORP_EXPORT_COLUMNS].sort_values(
+        ["Accounting Period", "Expense Category", "Account"]
+    ).reset_index(drop=True)
+
+
 ### ── SESSION STATE INIT ──────────────────────────────────────────────────────
 
 if "tool" not in st.session_state:
@@ -1034,6 +1280,18 @@ if "tool5_typo_overrides" not in st.session_state:
     st.session_state.tool5_typo_overrides = {}
 if "tool5_net_income_check_df" not in st.session_state:
     st.session_state.tool5_net_income_check_df = pd.DataFrame()
+if "tool5_corp_raw_df" not in st.session_state:
+    st.session_state.tool5_corp_raw_df = pd.DataFrame()
+if "tool5_corp_dept_remap" not in st.session_state:
+    st.session_state.tool5_corp_dept_remap = None
+if "tool5_corp_df" not in st.session_state:
+    st.session_state.tool5_corp_df = pd.DataFrame()
+if "tool5_corp_category_map" not in st.session_state:
+    st.session_state.tool5_corp_category_map = None
+if "tool5_corp_payroll_accounts" not in st.session_state:
+    st.session_state.tool5_corp_payroll_accounts = list(TOOL5_CORP_PAYROLL_ACCOUNTS)
+if "tool5_corp_excluded_departments" not in st.session_state:
+    st.session_state.tool5_corp_excluded_departments = list(TOOL5_CORP_DEFAULT_EXCLUDED_DEPARTMENTS)
 
 
 ### ── MENU ────────────────────────────────────────────────────────────────────
@@ -1079,6 +1337,13 @@ def go_home():
     st.session_state.tool5_property_merges = []
     st.session_state.tool5_typo_overrides = {}
     st.session_state.tool5_net_income_check_df = pd.DataFrame()
+    st.session_state.tool5_corp_raw_df = pd.DataFrame()
+    st.session_state.tool5_corp_dept_remap = None
+    st.session_state.tool5_corp_df = pd.DataFrame()
+    st.session_state.tool5_corp_category_map = None
+    st.session_state.tool5_corp_payroll_accounts = list(TOOL5_CORP_PAYROLL_ACCOUNTS)
+    st.session_state.tool5_corp_excluded_departments = list(TOOL5_CORP_DEFAULT_EXCLUDED_DEPARTMENTS)
+    st.session_state.pop("tool5_corp_cat_multiselect", None)
 
 
 if st.session_state.tool is None:
@@ -3006,6 +3271,13 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_property_merges = []
                 st.session_state.tool5_typo_overrides = {}
                 st.session_state.tool5_net_income_check_df = pd.DataFrame()
+                st.session_state.tool5_corp_raw_df = pd.DataFrame()
+                st.session_state.tool5_corp_dept_remap = None
+                st.session_state.tool5_corp_df = pd.DataFrame()
+                st.session_state.tool5_corp_category_map = None
+                st.session_state.tool5_corp_payroll_accounts = list(TOOL5_CORP_PAYROLL_ACCOUNTS)
+                st.session_state.tool5_corp_excluded_departments = list(TOOL5_CORP_DEFAULT_EXCLUDED_DEPARTMENTS)
+                st.session_state.pop("tool5_corp_cat_multiselect", None)
                 st.rerun()
         with col3:
             if st.button("Continue to Data Preparation →", type="primary", use_container_width=True, key="tool5_to_prep"):
@@ -3068,10 +3340,10 @@ elif st.session_state.tool == "tool5":
             {
                 "key": "tool5_path_corp_dash",
                 "title": "Corporate Expenses Dashboard",
-                "subtitle": "Coming soon",
-                "description": "Prepare data for the corporate expenses dashboard.",
-                "enabled": False,
-                "next_step": None,
+                "subtitle": "SICB Management Spend",
+                "description": "Extract and categorize SICB Management's own operating expenses (payroll, G&A, marketing, technology) for corporate-level reporting.",
+                "enabled": True,
+                "next_step": "corp_dept_cleanup",
             },
         ]
 
@@ -3089,6 +3361,13 @@ elif st.session_state.tool == "tool5":
                         type="primary" if path["enabled"] else "secondary",
                         disabled=not path["enabled"],
                     ):
+                        if path["key"] == "tool5_path_corp_dash":
+                            with st.spinner("Extracting SICB Management expense transactions..."):
+                                st.session_state.tool5_corp_raw_df = tool5_corp_extract(
+                                    st.session_state.tool5_gl_raw_list,
+                                    st.session_state.tool5_portfolio_raw_list,
+                                )
+                            st.session_state.tool5_corp_dept_remap = None
                         st.session_state.tool5_step = path["next_step"]
                         st.rerun()
 
@@ -3536,6 +3815,365 @@ elif st.session_state.tool == "tool5":
                 st.session_state.tool5_unit_econ_df = pd.DataFrame()
                 st.session_state.tool5_property_merges = []
                 st.session_state.tool5_net_income_check_df = pd.DataFrame()
+                st.session_state.tool5_corp_raw_df = pd.DataFrame()
+                st.session_state.tool5_corp_dept_remap = None
+                st.session_state.tool5_corp_df = pd.DataFrame()
+                st.session_state.tool5_corp_category_map = None
+                st.session_state.tool5_corp_payroll_accounts = list(TOOL5_CORP_PAYROLL_ACCOUNTS)
+                st.session_state.tool5_corp_excluded_departments = list(TOOL5_CORP_DEFAULT_EXCLUDED_DEPARTMENTS)
+                st.session_state.pop("tool5_corp_cat_multiselect", None)
                 for k in [k for k in st.session_state if k.startswith("tool5_dept_input_")]:
                     del st.session_state[k]
+                st.rerun()
+
+    # ── STEP: CORPORATE EXPENSES DASHBOARD — DEPARTMENT CLEANUP ──────────────
+
+    elif st.session_state.tool5_step == "corp_dept_cleanup":
+
+        st.subheader("Corporate Expenses Dashboard — Step 1: Department Cleanup")
+        st.caption(
+            "Sourced from the uploaded GL Transaction Detail across all periods — filtered to Class = "
+            "SICB Management, restricted to Income Statement accounts on the Expense section only "
+            "(Income, Cost of Goods Sold, Other Income, and Other Expense are excluded)."
+        )
+
+        raw_df = st.session_state.tool5_corp_raw_df
+
+        if raw_df.empty:
+            st.warning("No SICB Management expense transactions were found in the uploaded GL files.")
+        else:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Transactions", f"{len(raw_df):,}")
+            col2.metric("Distinct Accounts", raw_df["Account"].nunique())
+            col3.metric("Total Amount", f"${raw_df['Amount'].sum():,.2f}")
+
+        st.divider()
+        st.write("**Review Department cleanup**")
+        st.caption(
+            "Each raw Department value found in the data is shown below, pre-filled with the default "
+            "cleanup (text after the first \":\", or unchanged if there's no colon). Edit any value you "
+            "want to override."
+        )
+
+        raw_departments = sorted(raw_df["Department (Raw)"].dropna().unique().tolist())
+
+        if st.session_state.tool5_corp_dept_remap is None:
+            working_remap = {d: tool5_default_department(d) for d in raw_departments}
+        else:
+            working_remap = dict(st.session_state.tool5_corp_dept_remap)
+            for d in raw_departments:
+                if d not in working_remap:
+                    working_remap[d] = tool5_default_department(d)
+
+        if not raw_departments:
+            st.info("No Department values found in the extracted transactions.")
+        else:
+            for i, dept in enumerate(raw_departments):
+                key = f"tool5_corp_dept_input_{i}"
+                if key not in st.session_state:
+                    st.session_state[key] = working_remap[dept]
+
+            cols = st.columns(2)
+            for i, dept in enumerate(raw_departments):
+                with cols[i % 2]:
+                    st.text_input(f"`{dept}`", key=f"tool5_corp_dept_input_{i}")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Prep Options", use_container_width=True, key="tool5_corp_dept_back"):
+                st.session_state.tool5_step = "choose_prep_path"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool5_corp_dept_apply"):
+                new_remap = {}
+                for i, dept in enumerate(raw_departments):
+                    new_value = st.session_state.get(f"tool5_corp_dept_input_{i}", dept)
+                    new_remap[dept] = new_value.strip() if new_value.strip() else dept
+                st.session_state.tool5_corp_dept_remap = new_remap
+
+                final_df = raw_df.copy()
+                final_df["Department"] = final_df["Department (Raw)"].map(
+                    lambda d: new_remap.get(d, tool5_default_department(d)) if pd.notna(d) else d
+                )
+                final_df = final_df.drop(columns=["Department (Raw)"])
+                st.session_state.tool5_corp_df = final_df
+                for k in [k for k in st.session_state if k.startswith("tool5_corp_dept_input_")]:
+                    del st.session_state[k]
+                st.session_state.tool5_corp_category_map = None
+                st.session_state.tool5_step = "corp_categorize"
+                st.rerun()
+
+    # ── STEP: CORPORATE EXPENSES DASHBOARD — CATEGORIZE EXPENSES ─────────────
+
+    elif st.session_state.tool5_step == "corp_categorize":
+
+        st.subheader("Corporate Expenses Dashboard — Step 2: Categorize Expenses")
+        st.caption(
+            "Every account defaults to an Expense Category sourced from the standard Financial Statements "
+            "account mapping, with payroll accounts broken out into finer payroll categories. Any account "
+            "with no default mapping must be assigned before continuing."
+        )
+
+        df = st.session_state.tool5_corp_df
+        all_accounts = sorted(df["Account"].dropna().unique().tolist())
+
+        if st.session_state.tool5_corp_category_map is None:
+            working_map = {a: TOOL5_CORP_ACCOUNT_CATEGORY_MAP.get(a) for a in all_accounts}
+        else:
+            working_map = dict(st.session_state.tool5_corp_category_map)
+            for a in all_accounts:
+                if a not in working_map:
+                    working_map[a] = TOOL5_CORP_ACCOUNT_CATEGORY_MAP.get(a)
+
+        unmapped = [a for a in all_accounts if not working_map.get(a)]
+        mapped = [a for a in all_accounts if working_map.get(a)]
+
+        if unmapped:
+            st.error(
+                f"**{len(unmapped)} account(s) have no default Expense Category and must be assigned "
+                f"before you can continue:**\n\n" + "\n".join(f"- `{a}`" for a in unmapped)
+            )
+            st.divider()
+            st.write("**Assign a category to an unmapped account:**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                account_to_map = st.selectbox("Select unmapped account", options=unmapped, key="tool5_corp_unmap_select")
+            with col_b:
+                new_cat = st.selectbox("Assign category", options=TOOL5_CORP_EXPENSE_CATEGORIES, key="tool5_corp_unmap_cat")
+            if st.button("Map Account", type="primary", key="tool5_corp_map_account"):
+                working_map[account_to_map] = new_cat
+                st.session_state.tool5_corp_category_map = working_map
+                st.rerun()
+            st.divider()
+        else:
+            st.success(f"All {len(all_accounts)} accounts are mapped to an Expense Category.")
+
+        if mapped:
+            by_category = {}
+            for a in mapped:
+                by_category.setdefault(working_map[a], []).append(a)
+            totals = (
+                df.assign(**{"Expense Category": df["Account"].map(working_map)})
+                .groupby("Expense Category")["Amount"].sum()
+            )
+
+            st.write("**Current mapping, by category** (dollar totals across all uploaded periods):")
+            for cat in sorted(by_category):
+                with st.expander(f"{cat} — ${totals.get(cat, 0):,.2f} ({len(by_category[cat])} account(s))"):
+                    for a in by_category[cat]:
+                        st.markdown(f"- `{a}`")
+
+            st.divider()
+            st.write("**Change an existing mapping:**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                account_to_change = st.selectbox("Select account", options=all_accounts, key="tool5_corp_change_account")
+            with col_b:
+                current_cat = working_map.get(account_to_change)
+                cat_options = TOOL5_CORP_EXPENSE_CATEGORIES
+                default_idx = cat_options.index(current_cat) if current_cat in cat_options else 0
+                new_cat_change = st.selectbox("New category", options=cat_options, index=default_idx, key="tool5_corp_change_cat")
+            if st.button("Update Mapping", key="tool5_corp_update_mapping"):
+                working_map[account_to_change] = new_cat_change
+                st.session_state.tool5_corp_category_map = working_map
+                st.rerun()
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Department Cleanup", use_container_width=True, key="tool5_corp_cat_back"):
+                st.session_state.tool5_step = "corp_dept_cleanup"
+                st.rerun()
+        with col2:
+            if unmapped:
+                st.button(
+                    "Apply & Continue →", type="primary", use_container_width=True,
+                    key="tool5_corp_cat_apply", disabled=True,
+                )
+                st.caption("Map all accounts above before continuing.")
+            else:
+                if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool5_corp_cat_apply"):
+                    st.session_state.tool5_corp_category_map = working_map
+                    updated = st.session_state.tool5_corp_df.copy()
+                    updated["Expense Category"] = updated["Account"].map(working_map)
+                    st.session_state.tool5_corp_df = updated
+                    st.session_state.tool5_step = "corp_payroll_exclusion"
+                    st.rerun()
+
+    # ── STEP: CORPORATE EXPENSES DASHBOARD — PAYROLL DEPARTMENT EXCLUSION ────
+
+    elif st.session_state.tool5_step == "corp_payroll_exclusion":
+
+        st.subheader("Corporate Expenses Dashboard — Step 3: Payroll Department Exclusion")
+        st.caption(
+            "Transactions on the payroll accounts below are excluded from this dashboard when their "
+            "Department matches one of the excluded departments — these represent property-operations "
+            "labor (Cleaning/R&M crews) already captured elsewhere, not corporate payroll spend."
+        )
+
+        df = st.session_state.tool5_corp_df
+        payroll_accounts = list(st.session_state.tool5_corp_payroll_accounts)
+        excluded_departments = list(st.session_state.tool5_corp_excluded_departments)
+
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.write("**Payroll accounts subject to this rule:**")
+            for i, acct in enumerate(payroll_accounts):
+                col_a, col_r = st.columns([5, 1])
+                with col_a:
+                    st.markdown(f"- `{acct}`")
+                with col_r:
+                    if st.button("✕", key=f"tool5_corp_rm_payroll_acct_{i}", help="Remove"):
+                        payroll_accounts.pop(i)
+                        st.session_state.tool5_corp_payroll_accounts = payroll_accounts
+                        st.rerun()
+            available_accounts = sorted(df["Account"].dropna().unique().tolist())
+            addable = [a for a in available_accounts if a not in payroll_accounts]
+            if addable:
+                add_acct = st.selectbox("Add a payroll account", options=[""] + addable, key="tool5_corp_add_payroll_acct")
+                if st.button("Add Account", key="tool5_corp_add_payroll_btn"):
+                    if add_acct and add_acct not in payroll_accounts:
+                        payroll_accounts.append(add_acct)
+                        st.session_state.tool5_corp_payroll_accounts = payroll_accounts
+                        st.rerun()
+
+        with col_right:
+            st.write("**Departments that trigger exclusion:**")
+            for i, dept in enumerate(excluded_departments):
+                col_d, col_r = st.columns([5, 1])
+                with col_d:
+                    st.code(dept)
+                with col_r:
+                    if st.button("✕", key=f"tool5_corp_rm_dept_{i}", help="Remove"):
+                        excluded_departments.pop(i)
+                        st.session_state.tool5_corp_excluded_departments = excluded_departments
+                        st.rerun()
+            new_dept = st.text_input("Add a department", key="tool5_corp_new_dept_input")
+            if st.button("Add Department", key="tool5_corp_add_dept_btn"):
+                nd = new_dept.strip()
+                if nd and nd not in excluded_departments:
+                    excluded_departments.append(nd)
+                    st.session_state.tool5_corp_excluded_departments = excluded_departments
+                    st.rerun()
+
+        st.divider()
+
+        preview_mask = df["Account"].isin(payroll_accounts) & df["Department"].isin(excluded_departments)
+        n_excluded = int(preview_mask.sum())
+        amt_excluded = df.loc[preview_mask, "Amount"].sum()
+        if n_excluded:
+            st.warning(f"{n_excluded:,} transaction(s) totaling ${amt_excluded:,.2f} will be excluded with the current settings.")
+        else:
+            st.info("No transactions currently match this exclusion rule.")
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Categorize Expenses", use_container_width=True, key="tool5_corp_payroll_back"):
+                st.session_state.tool5_step = "corp_categorize"
+                st.rerun()
+        with col2:
+            if st.button("Apply & Continue →", type="primary", use_container_width=True, key="tool5_corp_payroll_apply"):
+                st.session_state.tool5_corp_payroll_accounts = payroll_accounts
+                st.session_state.tool5_corp_excluded_departments = excluded_departments
+                st.session_state.tool5_step = "corp_export"
+                st.rerun()
+
+    # ── STEP: CORPORATE EXPENSES DASHBOARD — EXPORT ──────────────────────────
+
+    elif st.session_state.tool5_step == "corp_export":
+
+        st.subheader("Corporate Expenses Dashboard — Step 4: Export")
+
+        base_df = tool5_corp_apply_payroll_dept_exclusion(
+            st.session_state.tool5_corp_df,
+            st.session_state.tool5_corp_payroll_accounts,
+            st.session_state.tool5_corp_excluded_departments,
+        )
+
+        all_categories = TOOL5_CORP_EXPENSE_CATEGORIES
+        default_selected = [c for c in all_categories if c not in TOOL5_CORP_DEFAULT_UNCHECKED_CATEGORIES]
+
+        st.caption(
+            "Operations (Cleaning/Maintenance) and Management Fee categories are excluded by default — "
+            "deselect any others you want to leave out, or add them back in."
+        )
+
+        if "tool5_corp_cat_multiselect" not in st.session_state:
+            st.session_state["tool5_corp_cat_multiselect"] = default_selected
+
+        col_sel, col_desel = st.columns(2)
+        with col_sel:
+            if st.button("Select All", key="tool5_corp_cat_select_all", use_container_width=True):
+                st.session_state["tool5_corp_cat_multiselect"] = all_categories
+                st.rerun()
+        with col_desel:
+            if st.button("Reset to Defaults", key="tool5_corp_cat_reset", use_container_width=True):
+                st.session_state["tool5_corp_cat_multiselect"] = default_selected
+                st.rerun()
+
+        selected_categories = st.multiselect(
+            "Expense Categories to include",
+            options=all_categories,
+            key="tool5_corp_cat_multiselect",
+        )
+
+        filtered_df = base_df[base_df["Expense Category"].isin(selected_categories)].copy()
+
+        st.divider()
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Categories Included", f"{len(selected_categories)} / {len(all_categories)}")
+        col2.metric("Transactions", f"{len(filtered_df):,}")
+        col3.metric("Total Amount", f"${filtered_df['Amount'].sum():,.2f}")
+        st.caption(
+            f"Baseline before payroll exclusion and category filter: {len(st.session_state.tool5_corp_df):,} "
+            f"transactions totaling ${st.session_state.tool5_corp_df['Amount'].sum():,.2f}."
+        )
+
+        st.divider()
+
+        if not filtered_df.empty:
+            st.write("**Amount by Expense Category:**")
+            chart_data = filtered_df.groupby("Expense Category")["Amount"].sum().sort_values(ascending=False)
+            st.bar_chart(chart_data)
+            st.divider()
+
+        export_df = tool5_corp_build_export(filtered_df)
+        TOOL5_PREVIEW_ROWS = 200
+        st.caption(f"Showing the first {TOOL5_PREVIEW_ROWS} of {len(export_df):,} rows — download the CSV below for the full data.")
+        st.dataframe(export_df.head(TOOL5_PREVIEW_ROWS), use_container_width=True)
+
+        export_csv = tool5_to_export_csv(
+            export_df,
+            text_columns=["Account", "Department", "Property", "Owner", "Property Owner Type", "Expense Category", "Memo", "Source Name"],
+        )
+        st.download_button(
+            label="Download Corporate Expenses CSV",
+            data=export_csv,
+            file_name="corporate_expenses_dashboard.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="tool5_corp_download",
+        )
+
+        st.divider()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Back to Payroll Exclusion", use_container_width=True, key="tool5_corp_export_back"):
+                st.session_state.tool5_step = "corp_payroll_exclusion"
+                st.rerun()
+        with col2:
+            if st.button("Restart Corporate Expenses Dashboard", use_container_width=True, key="tool5_corp_export_restart"):
+                st.session_state.tool5_corp_raw_df = pd.DataFrame()
+                st.session_state.tool5_corp_dept_remap = None
+                st.session_state.tool5_corp_df = pd.DataFrame()
+                st.session_state.tool5_corp_category_map = None
+                st.session_state.tool5_corp_payroll_accounts = list(TOOL5_CORP_PAYROLL_ACCOUNTS)
+                st.session_state.tool5_corp_excluded_departments = list(TOOL5_CORP_DEFAULT_EXCLUDED_DEPARTMENTS)
+                st.session_state.pop("tool5_corp_cat_multiselect", None)
+                st.session_state.tool5_step = "choose_prep_path"
                 st.rerun()
