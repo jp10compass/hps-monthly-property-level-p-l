@@ -518,6 +518,226 @@ def tool5_export_financial_statements_csv(df):
     return buffer.getvalue()
 
 
+TOOL5_OTA_INCOME_ACCOUNT_CHANNEL = {
+    "Home Away Commission": "VRBO/HomeAway",
+    "Expedia Commission": "Expedia",
+    "Booking.com Commission": "Booking.com",
+    "Airbnb Booking Fee": "Airbnb",
+    "Rentals United Commission": "Rentals United",
+}
+
+TOOL5_OTA_COST_ACCOUNT = "OTA Fees"
+
+TOOL5_OTA_ACCOUNTS = set(TOOL5_OTA_INCOME_ACCOUNT_CHANNEL) | {TOOL5_OTA_COST_ACCOUNT}
+
+# For the Cost account (OTA Fees), Channel is derived from the GL's Source Name
+# instead of the Account, since one shared "OTA Fees" account covers every OTA.
+TOOL5_OTA_SOURCE_NAME_CHANNEL = {
+    "Booking.com": "Booking.com",
+    "Expedia": "Expedia",
+    "Homeaway VRBO": "VRBO/HomeAway",
+    "Rental United": "Rentals United",
+    "Rentals United": "Rentals United",
+}
+
+
+def tool5_build_ota_data(gl_raw_list):
+    """Export 3 — OTA Data. Transaction-level detail for the OTA commission/fee
+    accounts (Class == "SICB Management" only, same as Exports 1/2), across all
+    uploaded GL files. Type is "Income" for the commission/fee accounts and
+    "Cost" for OTA Fees. Channel is looked up by Account for Income rows, and by
+    the GL's Source Name (via TOOL5_OTA_SOURCE_NAME_CHANNEL, defaulting to
+    "Other") for Cost rows, since OTA Fees is one shared account covering every
+    OTA. Amount keeps the GL's raw sign untouched."""
+    output_columns = ["Accounting Period", "Type", "Channel", "Channel-Type", "Memo", "Amount"]
+
+    pieces = []
+    for gl_raw in gl_raw_list:
+        gl = gl_raw.copy()
+        gl.columns = gl.columns.astype(str).str.strip()
+        required_cols = {"Type", "Account", "Class", "Amount", "Date"}
+        missing_cols = required_cols - set(gl.columns)
+        if missing_cols:
+            raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
+
+        real = gl[
+            gl["Type"].notna() & gl["Account"].notna()
+            & (gl["Class"] == "SICB Management")
+            & gl["Account"].isin(TOOL5_OTA_ACCOUNTS)
+        ].copy()
+        if real.empty:
+            continue
+
+        real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
+
+        is_cost = real["Account"] == TOOL5_OTA_COST_ACCOUNT
+        real["Type"] = is_cost.map({True: "Cost", False: "Income"})
+
+        if "Source Name" in real.columns:
+            source_name = real["Source Name"].astype(str).str.strip()
+        else:
+            source_name = pd.Series("", index=real.index)
+        cost_channel = source_name.map(TOOL5_OTA_SOURCE_NAME_CHANNEL).fillna("Other")
+        income_channel = real["Account"].map(TOOL5_OTA_INCOME_ACCOUNT_CHANNEL)
+        real["Channel"] = income_channel.where(~is_cost, cost_channel)
+        real["Channel-Type"] = real["Channel"] + " " + real["Type"]
+
+        real["Memo"] = real["Memo"] if "Memo" in real.columns else pd.NA
+        real["Amount"] = pd.to_numeric(real["Amount"], errors="coerce")
+        pieces.append(real[output_columns])
+
+    if not pieces:
+        return pd.DataFrame(columns=output_columns)
+    return pd.concat(pieces, ignore_index=True).sort_values(["Accounting Period", "Channel-Type"]).reset_index(drop=True)
+
+
+TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED = [
+    "Markup - Repair Labor",
+    "Markup - HVAC Repairs",
+    "Electric",
+    "Gas & Maintenance",
+    "HVAC Repairs",
+    "Plumbing",
+    "Repairs",
+    "Markup - Materials",
+    "Markup - Furniture",
+    "Markup - Appliance",
+    "AC Filters",
+    "Appliances",
+    "Furniture & Decorations",
+    "HVAC",
+    "Materials",
+    "Moveable",
+    "Signage",
+    "Auto Allowance",
+    "Equipment Rental",
+    "Garage Maintenance",
+    "Landscape Expense",
+    "Parking Lot",
+    "Trash Removal",
+    "Truck Rental",
+    "Maintenance Slippage",
+]
+
+# These accounts only count as Maintenance Data when their GL Department is
+# literally "R-M" — otherwise they're payroll/subcontractor spend for other
+# departments and shouldn't be included here.
+TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY = [
+    "Health Insurance",
+    "Paid Time Off",
+    "Parental Leave Time Off",
+    "Payroll Accounting",
+    "Payroll Bonus",
+    "Payroll Clearing",
+    "Payroll Fees",
+    "Payroll Guest Services",
+    "Payroll Inter Company",
+    "Payroll Marketing",
+    "Payroll Mgmt",
+    "Payroll Operations",
+    "Payroll Overtime",
+    "Payroll Owner Services",
+    "Payroll Taxes",
+    "Payroll Vacation",
+    "Worker's Compensation",
+    "Subcontractor",
+]
+
+TOOL5_MAINTENANCE_RM_DEPARTMENT = "R-M"
+
+TOOL5_MAINTENANCE_ACCOUNTS = TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED + TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY
+
+
+def tool5_build_maintenance_data(gl_raw_list):
+    """Export 4 — Maintenance Data. Transaction-level detail for maintenance
+    accounts, across all uploaded GL files. Unlike OTA Data / Exports 1-2, this
+    is NOT restricted to Class == "SICB Management" — every Class is included,
+    and Class Type / Billedback are derived per row to show the split: Class
+    Type is "SICB Management" when Class equals that exactly, else "Other";
+    Billedback is "N" for SICB Management rows and "Y" otherwise. The payroll/
+    Subcontractor accounts (TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY) only count when
+    the GL's raw Department is literally "R-M" — for those accounts, activity
+    in any other department is unrelated maintenance-labor spend and excluded.
+    The remaining maintenance accounts (TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED)
+    carry no Department restriction. Amount keeps the GL's raw sign untouched."""
+    output_columns = ["Accounting Period", "Source Name", "Memo", "Account", "Department", "Class", "Class Type", "Billedback", "Amount"]
+
+    pieces = []
+    for gl_raw in gl_raw_list:
+        gl = gl_raw.copy()
+        gl.columns = gl.columns.astype(str).str.strip()
+        required_cols = {"Type", "Account", "Class", "Amount", "Date"}
+        missing_cols = required_cols - set(gl.columns)
+        if missing_cols:
+            raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
+        for col in ["Department", "Source Name", "Memo"]:
+            if col not in gl.columns:
+                gl[col] = pd.NA
+
+        is_unrestricted = gl["Account"].isin(TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED)
+        is_rm_only = gl["Account"].isin(TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY) & (
+            gl["Department"].astype(str).str.strip() == TOOL5_MAINTENANCE_RM_DEPARTMENT
+        )
+        real = gl[gl["Type"].notna() & gl["Account"].notna() & (is_unrestricted | is_rm_only)].copy()
+        if real.empty:
+            continue
+
+        real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
+        real["Class Type"] = real["Class"].where(real["Class"] == "SICB Management", "Other")
+        real["Billedback"] = real["Class Type"].map({"SICB Management": "N"}).fillna("Y")
+        real["Amount"] = pd.to_numeric(real["Amount"], errors="coerce")
+        pieces.append(real[output_columns])
+
+    if not pieces:
+        return pd.DataFrame(columns=output_columns)
+    return pd.concat(pieces, ignore_index=True).sort_values(["Accounting Period", "Account"]).reset_index(drop=True)
+
+
+TOOL5_CLEANING_LAUNDRY_ACCOUNTS = ["Subcontractor"]
+TOOL5_CLEANING_LAUNDRY_DEPARTMENT = "Cleaning-Laundry"
+
+
+def tool5_build_cleaning_laundry_data(gl_raw_list):
+    """Export 5 — Cleaning-Laundry Data. Transaction-level detail for the
+    Subcontractor account, restricted to rows where the GL's raw Department is
+    literally "Cleaning-Laundry" (Subcontractor activity in any other
+    department is unrelated labor spend, not cleaning/laundry). Like
+    Maintenance Data, this is NOT restricted to Class == "SICB Management" —
+    every Class is included, with Class Type / Billedback derived per row the
+    same way. Amount keeps the GL's raw sign untouched."""
+    output_columns = ["Accounting Period", "Source Name", "Memo", "Account", "Department", "Class", "Class Type", "Billedback", "Amount"]
+
+    pieces = []
+    for gl_raw in gl_raw_list:
+        gl = gl_raw.copy()
+        gl.columns = gl.columns.astype(str).str.strip()
+        required_cols = {"Type", "Account", "Class", "Amount", "Date"}
+        missing_cols = required_cols - set(gl.columns)
+        if missing_cols:
+            raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
+        for col in ["Department", "Source Name", "Memo"]:
+            if col not in gl.columns:
+                gl[col] = pd.NA
+
+        real = gl[
+            gl["Type"].notna() & gl["Account"].notna()
+            & gl["Account"].isin(TOOL5_CLEANING_LAUNDRY_ACCOUNTS)
+            & (gl["Department"].astype(str).str.strip() == TOOL5_CLEANING_LAUNDRY_DEPARTMENT)
+        ].copy()
+        if real.empty:
+            continue
+
+        real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
+        real["Class Type"] = real["Class"].where(real["Class"] == "SICB Management", "Other")
+        real["Billedback"] = real["Class Type"].map({"SICB Management": "N"}).fillna("Y")
+        real["Amount"] = pd.to_numeric(real["Amount"], errors="coerce")
+        pieces.append(real[output_columns])
+
+    if not pieces:
+        return pd.DataFrame(columns=output_columns)
+    return pd.concat(pieces, ignore_index=True).sort_values(["Accounting Period", "Account"]).reset_index(drop=True)
+
+
 def tool5_attach(base_df, source_df, value_col, dup_accounts):
     """Left-merge value_col from source_df onto base_df, keyed by Account for
     accounts that are unambiguous, and by (Account, Section) for accounts that
@@ -3465,6 +3685,123 @@ elif st.session_state.tool == "tool5":
         )
 
         st.divider()
+
+        st.subheader("Export 3 — OTA Data")
+        st.caption(
+            "Transaction-level detail for the OTA commission/fee accounts, filtered to Class = SICB "
+            "Management like the exports above. Amount keeps the GL's raw sign."
+        )
+        with st.expander(f"Accounts included ({len(TOOL5_OTA_ACCOUNTS)})"):
+            st.write(", ".join(f"`{a}`" for a in sorted(TOOL5_OTA_ACCOUNTS)))
+
+        ota_df = tool5_build_ota_data(gl_raw_list)
+
+        income_total = ota_df.loc[ota_df["Type"] == "Income", "Amount"].sum() if not ota_df.empty else 0.0
+        cost_total = ota_df.loc[ota_df["Type"] == "Cost", "Amount"].sum() if not ota_df.empty else 0.0
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Transactions", f"{len(ota_df):,}")
+        col2.metric("Distinct Channels", ota_df["Channel"].nunique() if not ota_df.empty else 0)
+        col3.metric("Income Total", f"${income_total:,.2f}")
+        col4.metric("Cost Total", f"${cost_total:,.2f}")
+
+        if not ota_df.empty:
+            st.write("**Amount by Channel:**")
+            channel_totals = ota_df.groupby("Channel")["Amount"].sum().sort_values(ascending=False)
+            st.bar_chart(channel_totals)
+
+        st.dataframe(ota_df, use_container_width=True)
+        ota_csv = tool5_export_financial_statements_csv(ota_df)
+        st.download_button(
+            label="Download OTA Data (CSV)",
+            data=ota_csv,
+            file_name="hps_ota_data.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="tool5_fin_stmt_download_ota",
+        )
+
+        st.divider()
+
+        st.subheader("Export 4 — Maintenance Data")
+        st.caption(
+            "Transaction-level detail for maintenance accounts. Unlike the exports above, every Class is "
+            "included — Class Type and Billedback show the SICB Management vs. Other split per row. "
+            "Amount keeps the GL's raw sign."
+        )
+        with st.expander(f"Accounts included ({len(TOOL5_MAINTENANCE_ACCOUNTS)})"):
+            st.write("**No Department restriction:**")
+            st.write(", ".join(f"`{a}`" for a in TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED))
+            st.write(f"**Only when Department = \"{TOOL5_MAINTENANCE_RM_DEPARTMENT}\":**")
+            st.write(", ".join(f"`{a}`" for a in TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY))
+
+        maintenance_df = tool5_build_maintenance_data(gl_raw_list)
+
+        billed_back_total = maintenance_df.loc[maintenance_df["Billedback"] == "Y", "Amount"].sum() if not maintenance_df.empty else 0.0
+        not_billed_back_total = maintenance_df.loc[maintenance_df["Billedback"] == "N", "Amount"].sum() if not maintenance_df.empty else 0.0
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Transactions", f"{len(maintenance_df):,}")
+        col2.metric("Distinct Accounts", maintenance_df["Account"].nunique() if not maintenance_df.empty else 0)
+        col3.metric("Billed Back (Y) Total", f"${billed_back_total:,.2f}")
+        col4.metric("Billed Back (N) Total", f"${not_billed_back_total:,.2f}")
+
+        if not maintenance_df.empty:
+            st.write("**Amount by Account:**")
+            account_totals = maintenance_df.groupby("Account")["Amount"].sum().sort_values(ascending=False)
+            st.bar_chart(account_totals)
+
+        st.dataframe(maintenance_df, use_container_width=True)
+        maintenance_csv = tool5_export_financial_statements_csv(maintenance_df)
+        st.download_button(
+            label="Download Maintenance Data (CSV)",
+            data=maintenance_csv,
+            file_name="hps_maintenance_data.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="tool5_fin_stmt_download_maintenance",
+        )
+
+        st.divider()
+
+        st.subheader("Export 5 — Cleaning-Laundry Data")
+        st.caption(
+            "Transaction-level detail for the Subcontractor account, restricted to Department = "
+            "\"Cleaning-Laundry\". Like Maintenance Data, every Class is included — Class Type and "
+            "Billedback show the SICB Management vs. Other split per row. Amount keeps the GL's raw sign."
+        )
+        with st.expander(f"Accounts included ({len(TOOL5_CLEANING_LAUNDRY_ACCOUNTS)})"):
+            st.write(f"**Only when Department = \"{TOOL5_CLEANING_LAUNDRY_DEPARTMENT}\":**")
+            st.write(", ".join(f"`{a}`" for a in TOOL5_CLEANING_LAUNDRY_ACCOUNTS))
+
+        cleaning_laundry_df = tool5_build_cleaning_laundry_data(gl_raw_list)
+
+        cl_billed_back_total = cleaning_laundry_df.loc[cleaning_laundry_df["Billedback"] == "Y", "Amount"].sum() if not cleaning_laundry_df.empty else 0.0
+        cl_not_billed_back_total = cleaning_laundry_df.loc[cleaning_laundry_df["Billedback"] == "N", "Amount"].sum() if not cleaning_laundry_df.empty else 0.0
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Transactions", f"{len(cleaning_laundry_df):,}")
+        col2.metric("Distinct Accounts", cleaning_laundry_df["Account"].nunique() if not cleaning_laundry_df.empty else 0)
+        col3.metric("Billed Back (Y) Total", f"${cl_billed_back_total:,.2f}")
+        col4.metric("Billed Back (N) Total", f"${cl_not_billed_back_total:,.2f}")
+
+        if not cleaning_laundry_df.empty:
+            st.write("**Amount by Class Type:**")
+            class_type_totals = cleaning_laundry_df.groupby("Class Type")["Amount"].sum().sort_values(ascending=False)
+            st.bar_chart(class_type_totals)
+
+        st.dataframe(cleaning_laundry_df, use_container_width=True)
+        cleaning_laundry_csv = tool5_export_financial_statements_csv(cleaning_laundry_df)
+        st.download_button(
+            label="Download Cleaning-Laundry Data (CSV)",
+            data=cleaning_laundry_csv,
+            file_name="hps_cleaning_laundry_data.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="tool5_fin_stmt_download_cleaning_laundry",
+        )
+
+        st.divider()
         if st.button("← Back", key="tool5_fin_stmt_back"):
             st.session_state.tool5_step = "choose_prep_path"
             st.rerun()
@@ -3929,6 +4266,8 @@ elif st.session_state.tool == "tool5":
                 final_df["Department"] = final_df["Department (Raw)"].map(
                     lambda d: new_remap.get(d, tool5_default_department(d)) if pd.notna(d) else d
                 )
+                final_df["Department"] = final_df["Department"].fillna("").astype(str).str.strip()
+                final_df["Department"] = final_df["Department"].replace("", "Unassigned")
                 final_df = final_df.drop(columns=["Department (Raw)"])
                 st.session_state.tool5_corp_df = final_df
                 for k in [k for k in st.session_state if k.startswith("tool5_corp_dept_input_")]:
