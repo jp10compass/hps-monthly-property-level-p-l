@@ -3704,11 +3704,6 @@ elif st.session_state.tool == "tool5":
         col3.metric("Income Total", f"${income_total:,.2f}")
         col4.metric("Cost Total", f"${cost_total:,.2f}")
 
-        if not ota_df.empty:
-            st.write("**Amount by Channel:**")
-            channel_totals = ota_df.groupby("Channel")["Amount"].sum().sort_values(ascending=False)
-            st.bar_chart(channel_totals)
-
         st.dataframe(ota_df, use_container_width=True)
         ota_csv = tool5_export_financial_statements_csv(ota_df)
         st.download_button(
@@ -3745,11 +3740,6 @@ elif st.session_state.tool == "tool5":
         col3.metric("Billed Back (Y) Total", f"${billed_back_total:,.2f}")
         col4.metric("Billed Back (N) Total", f"${not_billed_back_total:,.2f}")
 
-        if not maintenance_df.empty:
-            st.write("**Amount by Account:**")
-            account_totals = maintenance_df.groupby("Account")["Amount"].sum().sort_values(ascending=False)
-            st.bar_chart(account_totals)
-
         st.dataframe(maintenance_df, use_container_width=True)
         maintenance_csv = tool5_export_financial_statements_csv(maintenance_df)
         st.download_button(
@@ -3783,11 +3773,6 @@ elif st.session_state.tool == "tool5":
         col2.metric("Distinct Accounts", cleaning_laundry_df["Account"].nunique() if not cleaning_laundry_df.empty else 0)
         col3.metric("Billed Back (Y) Total", f"${cl_billed_back_total:,.2f}")
         col4.metric("Billed Back (N) Total", f"${cl_not_billed_back_total:,.2f}")
-
-        if not cleaning_laundry_df.empty:
-            st.write("**Amount by Class Type:**")
-            class_type_totals = cleaning_laundry_df.groupby("Class Type")["Amount"].sum().sort_values(ascending=False)
-            st.bar_chart(class_type_totals)
 
         st.dataframe(cleaning_laundry_df, use_container_width=True)
         cleaning_laundry_csv = tool5_export_financial_statements_csv(cleaning_laundry_df)
