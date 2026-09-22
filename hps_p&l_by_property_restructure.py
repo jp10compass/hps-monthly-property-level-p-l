@@ -633,6 +633,7 @@ TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED = [
     "Markup - Steam Cleaning",
     "Laundry Attendant Payroll",
     "Linen Program Fee Income",
+    "Linen Program Fee",
     "Linen Inventory",
     "Linen Slippage",
     # Inventory
