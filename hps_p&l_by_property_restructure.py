@@ -592,6 +592,7 @@ def tool5_build_ota_data(gl_raw_list):
 
 
 TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED = [
+    # Maintenance
     "Markup - Repair Labor",
     "Markup - HVAC Repairs",
     "Electric",
@@ -617,6 +618,30 @@ TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED = [
     "Trash Removal",
     "Truck Rental",
     "Maintenance Slippage",
+    "Markup - Staging",
+    "Slippage",
+    "Slippage - Other",
+    # Cleaning
+    "Cleaning Fees",
+    "Cleaning Inspector",
+    "Cleaning Units",
+    "Cleaning Supplies",
+    "Garage Cleaning",
+    "Cleaning Slippage",
+    "Markup - Cleaning",
+    "Markup - Cleaning Supplies",
+    "Markup - Steam Cleaning",
+    "Laundry Attendant Payroll",
+    "Linen Program Fee Income",
+    "Linen Inventory",
+    "Linen Slippage",
+    # Inventory
+    "Consumables",
+    "Consumables Slippage",
+    "Unit Inventory",
+    "Markup - Unit Inventory",
+    "Inventory Slippage",
+    "Markup - Locks",
 ]
 
 # These accounts only count as Maintenance Data when their GL Department is
@@ -643,30 +668,44 @@ TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY = [
     "Subcontractor",
 ]
 
-TOOL5_MAINTENANCE_RM_DEPARTMENT = "R-M"
+TOOL5_MAINTENANCE_ALLOWED_DEPARTMENTS = {"R-M", "Cleaning-Laundry"}
 
 TOOL5_MAINTENANCE_ACCOUNTS = TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED + TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY
 
 
 def tool5_build_maintenance_data(gl_raw_list):
-    """Export 4 — Maintenance Data. Transaction-level detail for maintenance
-    accounts, across all uploaded GL files. Unlike OTA Data / Exports 1-2, this
-    is NOT restricted to Class == "SICB Management" — every Class is included,
-    and Class Type / Billedback are derived per row to show the split: Class
-    Type is "SICB Management" when Class equals that exactly, else "Other";
-    Billedback is "N" for SICB Management rows and "Y" otherwise. The payroll/
-    Subcontractor accounts (TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY) only count when
-    the GL's raw Department is literally "R-M" — for those accounts, activity
-    in any other department is unrelated maintenance-labor spend and excluded.
-    The remaining maintenance accounts (TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED)
-    carry no Department restriction. Amount keeps the GL's raw sign untouched."""
-    output_columns = ["Accounting Period", "Source Name", "Memo", "Account", "Department", "Class", "Class Type", "Billedback", "Amount"]
+    """Export 4 — Maintenance, Cleaning & Inventory Data. Transaction-level
+    detail for the combined Maintenance, Cleaning, and Inventory accounts,
+    across all uploaded GL files. Unlike OTA Data / Exports 1-2, this is NOT
+    restricted to Class == "SICB Management" — every Class is included, and
+    Class Type / Billedback are derived per row to show the split: Class Type
+    is "SICB Management" when Class equals that exactly, else "Other";
+    Billedback is "N" for SICB Management rows and "Y" otherwise. The
+    payroll/Subcontractor accounts (TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY) only
+    count when the GL's raw Department — after stripping any "X:" prefix
+    (e.g. "Operations:R-M" -> "R-M"; QuickBooks always prefixes the raw
+    Department with a parent department this way) — is one of
+    TOOL5_MAINTENANCE_ALLOWED_DEPARTMENTS ("R-M" or "Cleaning-Laundry"); for
+    those accounts, activity in any other department is unrelated labor
+    spend and excluded. The remaining accounts
+    (TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED) carry no Department
+    restriction. Amount keeps the GL's raw sign untouched. Owner/Property/
+    Property Owner Type are derived via
+    tool5_split_owner_property_with_class_fallback: Name is tried first
+    (same "Owner -C:Property" convention as tool5_extract_unit_economics),
+    and Class is tried the same way when Name has no colon, since real
+    Owner:Property detail for transactions posted under an owner entity's
+    own books (rather than SICB Management's) lives in Class instead."""
+    output_columns = [
+        "Accounting Period", "Source Name", "Memo", "Account", "Department", "Class", "Class Type",
+        "Billedback", "Property", "Owner", "Property Owner Type", "Amount",
+    ]
 
     pieces = []
     for gl_raw in gl_raw_list:
         gl = gl_raw.copy()
         gl.columns = gl.columns.astype(str).str.strip()
-        required_cols = {"Type", "Account", "Class", "Amount", "Date"}
+        required_cols = {"Type", "Account", "Class", "Name", "Amount", "Date"}
         missing_cols = required_cols - set(gl.columns)
         if missing_cols:
             raise ValueError(f"GL file is missing required column(s): {', '.join(sorted(missing_cols))}")
@@ -674,10 +713,9 @@ def tool5_build_maintenance_data(gl_raw_list):
             if col not in gl.columns:
                 gl[col] = pd.NA
 
+        dept_cleaned = gl["Department"].apply(tool5_default_department)
         is_unrestricted = gl["Account"].isin(TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED)
-        is_rm_only = gl["Account"].isin(TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY) & (
-            gl["Department"].astype(str).str.strip() == TOOL5_MAINTENANCE_RM_DEPARTMENT
-        )
+        is_rm_only = gl["Account"].isin(TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY) & dept_cleaned.isin(TOOL5_MAINTENANCE_ALLOWED_DEPARTMENTS)
         real = gl[gl["Type"].notna() & gl["Account"].notna() & (is_unrestricted | is_rm_only)].copy()
         if real.empty:
             continue
@@ -685,6 +723,14 @@ def tool5_build_maintenance_data(gl_raw_list):
         real["Accounting Period"] = (pd.to_datetime(real["Date"], errors="coerce") + pd.offsets.MonthEnd(0)).dt.date
         real["Class Type"] = real["Class"].where(real["Class"] == "SICB Management", "Other")
         real["Billedback"] = real["Class Type"].map({"SICB Management": "N"}).fillna("Y")
+
+        split_result = real.apply(
+            lambda r: tool5_split_owner_property_with_class_fallback(r["Name"], r["Class"]), axis=1
+        )
+        real["Owner"] = split_result.apply(lambda t: tool5_clean_owner(t[0]))
+        real["Property"] = split_result.apply(lambda t: t[1] if t[1] == "Corporate" else normalize_property_name(t[1]))
+        real["Property Owner Type"] = real["Owner"].apply(tool5_owner_type)
+
         real["Amount"] = pd.to_numeric(real["Amount"], errors="coerce")
         pieces.append(real[output_columns])
 
@@ -932,6 +978,20 @@ def tool5_owner_type(owner):
     if owner == "Corporate":
         return "Corporate"
     return "Third Party"
+
+
+def tool5_split_owner_property_with_class_fallback(name, class_value):
+    """Same convention as tool5_split_owner_property (split on the first
+    ':'), tried against Name first; if Name has no colon (e.g. "SICB -
+    Customer"), Class is tried the same way instead, since the real
+    Owner:Property detail for transactions posted under an owner entity's
+    own books (rather than SICB Management's, e.g. Class =
+    "Merali, Noah:132 Ocean Estates Dr .20") lives in Class, not Name.
+    "Corporate"/"Corporate" if neither has a colon."""
+    owner, prop = tool5_split_owner_property(name)
+    if prop == "Corporate":
+        owner, prop = tool5_split_owner_property(class_value)
+    return owner, prop
 
 
 def tool5_default_department(department):
@@ -3718,16 +3778,20 @@ elif st.session_state.tool == "tool5":
 
         st.divider()
 
-        st.subheader("Export 4 — Maintenance Data")
+        st.subheader("Export 4 — Maintenance, Cleaning & Inventory Data")
         st.caption(
-            "Transaction-level detail for maintenance accounts. Unlike the exports above, every Class is "
-            "included — Class Type and Billedback show the SICB Management vs. Other split per row. "
+            "Transaction-level detail for Maintenance, Cleaning, and Inventory accounts combined. Unlike "
+            "the exports above, every Class is included — Class Type and Billedback show the SICB "
+            "Management vs. Other split per row. Property/Owner/Property Owner Type are extracted by "
+            "splitting the GL's Name field on the first ':' (falling back to Class the same way when Name "
+            "has no colon, since owner-entity-class transactions carry Owner:Property in Class instead). "
             "Amount keeps the GL's raw sign."
         )
         with st.expander(f"Accounts included ({len(TOOL5_MAINTENANCE_ACCOUNTS)})"):
             st.write("**No Department restriction:**")
             st.write(", ".join(f"`{a}`" for a in TOOL5_MAINTENANCE_ACCOUNTS_UNRESTRICTED))
-            st.write(f"**Only when Department = \"{TOOL5_MAINTENANCE_RM_DEPARTMENT}\":**")
+            allowed_depts_label = " or ".join(f"\"{d}\"" for d in sorted(TOOL5_MAINTENANCE_ALLOWED_DEPARTMENTS))
+            st.write(f"**Only when Department = {allowed_depts_label}:**")
             st.write(", ".join(f"`{a}`" for a in TOOL5_MAINTENANCE_ACCOUNTS_RM_ONLY))
 
         maintenance_df = tool5_build_maintenance_data(gl_raw_list)
@@ -3743,9 +3807,9 @@ elif st.session_state.tool == "tool5":
         st.dataframe(maintenance_df, use_container_width=True)
         maintenance_csv = tool5_export_financial_statements_csv(maintenance_df)
         st.download_button(
-            label="Download Maintenance Data (CSV)",
+            label="Download Maintenance, Cleaning & Inventory Data (CSV)",
             data=maintenance_csv,
-            file_name="hps_maintenance_data.csv",
+            file_name="hps_maintenance_cleaning_inventory_data.csv",
             mime="text/csv",
             type="primary",
             use_container_width=True,
